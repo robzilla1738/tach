@@ -140,6 +140,50 @@ The interpreter has a fixed clock, no randomness, and no real I/O. Every run is
 reproducible — which is what lets `tach replay` re-execute a recorded agent loop and get
 byte-identical results, and what makes the agent-loop metrics trustworthy.
 
+## Goals
+
+A `goal` is a top-level declaration that turns the repair loop into a durable,
+authority-scoped run. It is declarative: it states the budget a run may spend, the
+authority it is granted, and the conditions required for success. The runtime
+(`tach goal run`) supplies the loop.
+
+```tach
+goal FixFailingTests -> Success {
+  budget {
+    steps: 30        // hard cap on repair steps (enforced)
+    retries: 3       // consecutive rejections tolerated before giving up (enforced)
+    time: 20m        // recorded; wall-clock budgets are not part of the replayable core
+    cost: 0          // recorded
+  }
+  allow {
+    effect db.read              // effects the run may newly perform
+    effect db.write
+    fs.read "."                 // a single glob, bare
+    fs.write ["src/**", "tests/**"]   // or a list
+    shell.run ["cargo test", "bun test"]
+    tach.check                  // a bare dotted name is a tool grant
+  }
+  require {
+    tests.pass                  // success conditions the runtime can evaluate
+    no_new_effects
+  }
+}
+```
+
+The `allow` block is **authority**, not documentation. A patch that would write outside the
+`fs.write` globs, or perform an effect the goal never granted, is rejected by the same
+verification pipeline that runs the tests — before it touches disk. The success conditions
+the runtime understands are `tests.pass`, `no_new_effects`, `no_forbidden_effects`, and
+`check.clean`; naming any other condition is a warning, since the goal could never be
+satisfied. A goal with no `steps` or `retries` budget is also flagged — long-horizon runs
+must be bounded.
+
+Runs are durable: every step appends an immutable event to
+`.tach/goals/<run_id>/events.jsonl` and writes a checkpoint, so `tach goal resume` can
+recover a crashed run from exactly where it stopped without repeating work, and
+`tach goal replay` reproduces it byte-for-byte. See the architecture notes for the full
+model.
+
 ## Formatting
 
 There is **one formatter**. `tach fmt` renders any file to a single canonical style
@@ -163,7 +207,10 @@ formatting is a planned follow-up).
 | `E0341` | `unknown_variant` | rename to the nearest variant (did-you-mean) |
 | `E0460` | `unused_import` (warning) | remove the unused `import` line |
 | `E0461` | `unused_variable` (warning) | prefix the binding with `_` |
+| `E0431` | `unknown_require_condition` (warning) | name a condition the runtime can check |
+| `E0432` | `goal_unbounded` (warning) | add a `budget { steps: N }` block |
 
-Each carries a `preferred_patch` so `tach fix` can apply it without guessing. The
+The mechanical code diagnostics each carry a `preferred_patch` so `tach fix` can apply them
+without guessing. The
 did-you-mean diagnostics only suggest a rename when a real name is a small edit away —
 they never guess wildly, because an agent would dutifully apply a bad rename.

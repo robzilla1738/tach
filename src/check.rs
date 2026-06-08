@@ -87,12 +87,65 @@ pub fn check_program(program: &Program) -> Vec<Diagnostic> {
                     check_block_fields(&t.body, &mut env, unit, &reg, &sigs, &mut diags);
                     check_unused_vars(&t.body, unit, &mut diags);
                 }
+                Item::Goal(g) => check_goal(g, unit, &mut diags),
                 _ => {}
             }
         }
     }
 
     diags
+}
+
+/// The conditions a `require { ... }` block understands. An unknown condition can
+/// never be satisfied, so naming one is almost certainly a mistake — we surface
+/// it as a warning with the closest known set.
+pub const KNOWN_REQUIRE_CONDS: &[&str] = &[
+    "tests.pass",
+    "no_new_effects",
+    "no_forbidden_effects",
+    "check.clean",
+];
+
+/// Validate a `goal` declaration. Goal validation is deliberately permissive
+/// about *effects* (an `allow` list may name effects the current builtin set
+/// doesn't implement yet, e.g. `stripe.refund`, which is forward-looking by
+/// design) but strict about *require* conditions, which must be ones the runtime
+/// can actually evaluate.
+fn check_goal(g: &GoalDecl, unit: &Unit, diags: &mut Vec<Diagnostic>) {
+    for c in &g.require.conditions {
+        if !KNOWN_REQUIRE_CONDS.contains(&c.name.as_str()) {
+            diags.push(
+                Diagnostic::warning(
+                    "E0431",
+                    "unknown_require_condition",
+                    format!(
+                        "`{}` is not a success condition the runtime can check",
+                        c.name
+                    ),
+                    &unit.source.path,
+                    c.span,
+                )
+                .with_note(format!(
+                    "known conditions: {}",
+                    KNOWN_REQUIRE_CONDS.join(", ")
+                )),
+            );
+        }
+    }
+    // A goal with no budget at all will run unbounded; nudge the author.
+    let b = &g.budget;
+    if b.steps.is_none() && b.retries.is_none() {
+        diags.push(
+            Diagnostic::warning(
+                "E0432",
+                "goal_unbounded",
+                format!("goal `{}` declares no step or retry budget", g.name),
+                &unit.source.path,
+                g.name_span,
+            )
+            .with_note("add a `budget { steps: N }` block so the run is bounded"),
+        );
+    }
 }
 
 fn build_sigs(program: &Program) -> HashMap<String, FnSig> {

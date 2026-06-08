@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tach.dev/schemas/run.schema.json",
+  "title": "Tach Run State",
+  "description": "The mutable head of a goal run (state.json): the latest summary of status, progress, and agent-loop metrics. The immutable history lives in events.jsonl.",
+  "type": "object",
+  "required": ["run_id", "goal", "status", "step"],
+  "additionalProperties": false,
+  "properties": {
+    "run_id": { "type": "string" },
+    "goal": { "type": "string" },
+    "status": {
+      "type": "string",
+      "enum": ["running", "completed", "failed", "cancelled", "budget_exhausted"]
+    },
+    "step": { "type": "integer", "minimum": 0, "description": "Steps completed (== highest checkpoint)." },
+    "consecutive_rejections": { "type": "integer", "minimum": 0 },
+    "patches_applied": { "type": "integer", "minimum": 0 },
+    "patches_rejected": { "type": "integer", "minimum": 0 },
+    "tests_run": { "type": "integer", "minimum": 0 },
+    "regressions": { "type": "integer", "minimum": 0 },
+    "diff_chars": { "type": "integer", "minimum": 0 },
+    "final_errors": { "type": "integer", "minimum": 0 },
+    "tests_passed": { "type": "integer", "minimum": 0 },
+    "tests_failed": { "type": "integer", "minimum": 0 }
+  }
+}

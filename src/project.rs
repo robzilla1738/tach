@@ -106,6 +106,7 @@ pub fn scaffold(parent: &Path, name: &str, clean: bool) -> io::Result<PathBuf> {
     } else {
         fs::write(root.join("src/auth.tach"), DEMO_AUTH)?;
         fs::write(root.join("tests/auth_test.tach"), DEMO_TEST)?;
+        fs::write(root.join("goal.tach"), DEMO_GOAL)?;
     }
     Ok(root)
 }
@@ -160,6 +161,31 @@ test "expired session rejected" {
 
 test "missing session rejected" {
   ensure load_session("nope").is_err()
+}
+"#;
+
+/// The demo's goal: a durable, budgeted, authority-scoped contract for driving
+/// the planted-bug project from red to green. `tach goal run FixFailingTests`
+/// executes the same repair loop as `tach fix`, but checkpointed and resumable,
+/// and refuses any patch that would write outside `src/**`/`tests/**` or perform
+/// an effect it was never granted. Written in canonical form so `tach fmt` is a
+/// no-op on a fresh project.
+pub const DEMO_GOAL: &str = r#"goal FixFailingTests -> Success {
+  budget {
+    steps: 30
+    retries: 3
+  }
+  allow {
+    effect db.read
+    effect db.write
+    effect time.read
+    effect log.write
+    fs.write ["src/**", "tests/**"]
+  }
+  require {
+    tests.pass
+    no_new_effects
+  }
 }
 "#;
 

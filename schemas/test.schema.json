@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tach.dev/schemas/test.schema.json",
+  "title": "Tach Test Report",
+  "description": "The JSON emitted by `tach test --json`: the outcome of a (possibly filtered) test suite run.",
+  "type": "object",
+  "required": ["outcomes", "passed", "failed"],
+  "additionalProperties": false,
+  "properties": {
+    "outcomes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "passed"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string" },
+          "passed": { "type": "boolean" },
+          "reason": { "type": "string", "description": "Present only on failure." }
+        }
+      }
+    },
+    "passed": { "type": "integer", "minimum": 0 },
+    "failed": { "type": "integer", "minimum": 0 }
+  }
+}

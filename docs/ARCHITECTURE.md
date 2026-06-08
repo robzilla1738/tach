@@ -14,7 +14,17 @@ source ──▶ lexer ──▶ parser ──▶ AST ──┬──▶ checker
                           Workspace ──▶ Patch ──▶ verify ──▶ commit
                                                   │
                                             agent loop (fix / race)
+                                                  │
+              goal (budget · authority · require) ──▶ runtime ──▶ events + checkpoints
+                                                  │                       │
+                                            durable store  ◀── resume / replay
 ```
+
+The bottom two rows are the **goal runtime**: the same repair loop, made durable. A `goal`
+declares a budget it can't exceed and an authority it can't escape; the runtime drives the
+loop under those constraints, emitting an append-only event per step and a checkpoint after
+each one, so a crashed run resumes from exactly where it stopped and a finished run replays
+byte-for-byte.
 
 ## Modules
 
@@ -32,9 +42,14 @@ source ──▶ lexer ──▶ parser ──▶ AST ──┬──▶ checker
 | `value` / `interp` | deterministic tree-walking interpreter; `?` / `ensure` / `return` modeled as non-local control flow; sum-type variants and `match` |
 | `runner` | the test runner + impact-scoped runs |
 | `patch` | `Workspace`, `Edit`, `Patch`, the verify pipeline, call-graph impact analysis, glob scoping |
-| `agent` | the `fix` loop, the optional `Coder` seam (default off), speculative `race`, the suite benchmark, and the agent-era `Metrics` |
-| `fmt` | the one canonical formatter — a precedence-aware, idempotent AST pretty-printer |
-| `trace` | persist/load runs to `.tach/trace.json` |
+| `agent` | the `fix` loop, the optional `Coder` seam (default off), speculative `race`, the suite benchmark, the agent-era `Metrics`, and the shared repair leaves (`collect_problems`, `pick_candidate`, `build_patch`) the goal runtime reuses |
+| `goal` | the resolved `GoalSpec` (budget, authority, success conditions), decoupled from spans so it serializes into the store |
+| `event` | the `tach.event.v1` envelope and the append-only JSONL `EventLog` |
+| `store` | the durable goal store: `goal.json`, `state.json`, `events.jsonl`, `checkpoints/`, and the deterministic, offline run-id derivation |
+| `runtime` | the durable executor — `step_once` (the pure decision), `drive` (persisting loop with budgets, checkpoints, crash), `resume_run`, `replay_run`, `cancel_run` |
+| `fmt` | the one canonical formatter — a precedence-aware, idempotent AST pretty-printer (goals included) |
+| `schema` | versioned JSON Schemas for every machine output, embedded and served by `tach schema` |
+| `trace` | persist/load `fix`/`race` runs to `.tach/trace.json` (the per-goal history lives in the store) |
 | `render` / `term` | pretty, colored human output (JSON is the machine path) |
 | `project` / `cli` | file discovery, scaffolding, suite loading, the command dispatcher |
 
@@ -91,6 +106,59 @@ model-backed coder is a future implementation of the same trait behind a flag.
 `agent::run_suite` runs the loop over every project in a suite (e.g. `corpus/`, one broken
 project per diagnostic family) and aggregates the metrics — time-to-green, patches-to-green,
 tests-run, regressions — so the thesis is measured over more than the single demo.
+
+## The goal runtime (`runtime`)
+
+A `goal` is the repair loop made durable. The same leaves run — `collect_problems`,
+`pick_candidate`, `build_patch`, `verify_patch` — but each step is wrapped in a policy gate,
+an event, and a checkpoint.
+
+```
+drive(goal, workspace):
+  loop:
+    if step >= budget.steps: status = budget_exhausted; stop
+    outcome = step_once(workspace, goal)          # pure decision, shared with replay
+    match outcome:
+      Done:      status = completed; emit run.completed; stop
+      NoAction:  status = failed;    emit run.failed;    stop
+      Patch:
+        emit diagnostic.emitted, patch.proposed
+        verify under VerifyOpts { allowed_effects, allowed_writes }   # the goal's authority
+        if accepted: workspace = new; emit patch.applied
+        else:        emit patch.rejected; if consecutive > budget.retries: fail
+        step += 1
+        write checkpoint(step); emit checkpoint.written; save state
+        if crash_after == step: return (durable, not finalized)
+```
+
+Three properties carry the design:
+
+- **Authority is enforced, not advertised.** The `allow` block becomes `VerifyOpts`:
+  `allowed_effects` rejects a patch that would perform an ungranted effect; `allowed_writes`
+  rejects an edit outside the granted `fs.write` globs. Both are caught by the *same*
+  pipeline that runs the tests, before anything touches disk.
+- **Resume never duplicates work.** A checkpoint stores the post-step workspace. Resuming
+  loads the latest checkpoint and continues, so the patches already applied are simply
+  *not* re-derived — `step_once` sees a workspace where those diagnostics are gone. The
+  event log is appended (a `run.resumed` boundary), never rewritten.
+- **Determinism makes it addressable.** The run id is an FNV-1a hash of the goal name and
+  its base source — no clock, no randomness — so `resume`, `replay`, and `inspect` need no
+  external bookkeeping. `replay_run` re-derives the run with the pure `simulate` (the same
+  `step_once`, no I/O) and proves it reproduces the recorded final state.
+
+The working tree is never half-edited: the runtime operates on an in-memory `Workspace` and
+only writes verified files back when a run reaches `completed`. A crash leaves the source
+exactly as it was; the durable state lives entirely under `.tach/goals/<run_id>/`.
+
+### The store layout
+
+```
+.tach/goals/<run_id>/
+  goal.json               the resolved GoalSpec + the base source snapshot
+  state.json              the mutable RunState head (status, step, metrics)
+  events.jsonl            append-only history (one tach.event.v1 per line)
+  checkpoints/<step>.json a workspace snapshot taken after each step
+```
 
 ## Why an interpreter (for now)
 

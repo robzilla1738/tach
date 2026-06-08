@@ -303,7 +303,44 @@ pub fn fix_with_coder(
     }
 }
 
-fn build_patch(diag: &Diagnostic, strategy: Strategy, ws: &Workspace) -> Patch {
+/// Collect the current problems in a workspace: parse+semantic errors, warnings,
+/// and the full test report. Shared by the repair loop and the goal runtime so
+/// both see exactly the same picture of "what's wrong right now".
+pub(crate) fn collect_problems(
+    ws: &Workspace,
+) -> (Vec<Diagnostic>, Vec<Diagnostic>, crate::runner::TestReport) {
+    let (prog, pdiags) = ws.program();
+    let mut errors: Vec<Diagnostic> = pdiags.into_iter().filter(|d| d.is_error()).collect();
+    let semantic = check_program(&prog);
+    let warnings: Vec<Diagnostic> = semantic.iter().filter(|d| !d.is_error()).cloned().collect();
+    errors.extend(semantic.into_iter().filter(|d| d.is_error()));
+    let report = run_tests(&prog, None);
+    (errors, warnings, report)
+}
+
+/// Choose the next diagnostic to repair: the lowest-positioned error carrying a
+/// `preferred_patch`, falling back to warnings under the `strict` strategy. This
+/// is the single deterministic choice both `tach fix` and `tach goal run` make.
+pub(crate) fn pick_candidate<'a>(
+    errors: &'a [Diagnostic],
+    warnings: &'a [Diagnostic],
+    strategy: Strategy,
+) -> Option<&'a Diagnostic> {
+    let mut candidates: Vec<&Diagnostic> = errors
+        .iter()
+        .filter(|d| d.preferred_patch.is_some())
+        .collect();
+    if candidates.is_empty() && strategy == Strategy::Strict {
+        candidates = warnings
+            .iter()
+            .filter(|d| d.preferred_patch.is_some())
+            .collect();
+    }
+    candidates.sort_by(|a, b| a.file.cmp(&b.file).then(a.span.start.cmp(&b.span.start)));
+    candidates.first().copied()
+}
+
+pub(crate) fn build_patch(diag: &Diagnostic, strategy: Strategy, ws: &Workspace) -> Patch {
     let pp = diag
         .preferred_patch
         .clone()
@@ -336,7 +373,7 @@ fn build_patch(diag: &Diagnostic, strategy: Strategy, ws: &Workspace) -> Patch {
     }
 }
 
-fn diag_summary(d: &Diagnostic, ws: &Workspace) -> DiagSummary {
+pub(crate) fn diag_summary(d: &Diagnostic, ws: &Workspace) -> DiagSummary {
     let (line, col) = ws
         .files
         .get(&d.file)
@@ -352,7 +389,7 @@ fn diag_summary(d: &Diagnostic, ws: &Workspace) -> DiagSummary {
     }
 }
 
-fn patch_summary(p: &Patch) -> PatchSummary {
+pub(crate) fn patch_summary(p: &Patch) -> PatchSummary {
     let (file, replacement) = p
         .edits
         .first()
@@ -367,7 +404,7 @@ fn patch_summary(p: &Patch) -> PatchSummary {
     }
 }
 
-fn verdict_summary(v: &PatchVerdict) -> VerdictSummary {
+pub(crate) fn verdict_summary(v: &PatchVerdict) -> VerdictSummary {
     VerdictSummary {
         accepted: v.accepted,
         rejections: v.rejections.clone(),

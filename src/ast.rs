@@ -15,6 +15,69 @@ pub enum Item {
     Type(TypeDecl),
     Fn(FnDecl),
     Test(TestDecl),
+    Goal(GoalDecl),
+}
+
+/// A `goal` declaration: the typed, durable contract a long-horizon agent run is
+/// held to. A goal is declarative — it names the budget it may spend, the
+/// authority it is allowed to exercise (effects, file scopes, tools), and the
+/// conditions that must hold for it to be considered a success. The durable
+/// runtime (`tach goal run`) executes the repair loop under exactly these
+/// constraints, checkpointing as it goes so a crashed run can resume without
+/// repeating work.
+#[derive(Clone, Debug)]
+pub struct GoalDecl {
+    pub name: String,
+    pub name_span: Span,
+    /// The success type after `->`, if written (e.g. `-> Success`). Documentary.
+    pub success: Option<String>,
+    pub budget: GoalBudget,
+    pub allow: GoalAllow,
+    pub require: GoalRequire,
+    pub span: Span,
+}
+
+/// The `budget { ... }` block: the resources a goal run may spend before it is
+/// declared exhausted. `steps` and `retries` are enforced deterministically;
+/// `time` and `cost` are recorded (and surfaced in the trace) but, being
+/// wall-clock and accounting concerns, are not part of the replayable core.
+#[derive(Clone, Debug, Default)]
+pub struct GoalBudget {
+    pub steps: Option<u64>,
+    pub retries: Option<u64>,
+    /// Raw duration text exactly as written, e.g. `20m`.
+    pub time: Option<String>,
+    pub cost: Option<i64>,
+    pub span: Span,
+}
+
+/// The `allow { ... }` block: the authority a goal run is granted. A run may
+/// perform only the effects listed here, may write only files matching
+/// `fs_write`, and may invoke only the listed tools/shell commands. The runtime
+/// rejects any patch that would exceed this surface — before it touches disk.
+#[derive(Clone, Debug, Default)]
+pub struct GoalAllow {
+    pub effects: Vec<EffectRef>,
+    pub fs_read: Vec<String>,
+    pub fs_write: Vec<String>,
+    pub shell: Vec<String>,
+    pub tools: Vec<String>,
+    pub span: Span,
+}
+
+/// The `require { ... }` block: the conditions that must hold for the run to be
+/// considered a success (e.g. `tests.pass`, `no_new_effects`).
+#[derive(Clone, Debug, Default)]
+pub struct GoalRequire {
+    pub conditions: Vec<RequireCond>,
+    pub span: Span,
+}
+
+/// One success condition, carrying its span so the checker can point at it.
+#[derive(Clone, Debug)]
+pub struct RequireCond {
+    pub name: String,
+    pub span: Span,
 }
 
 #[derive(Clone, Debug)]

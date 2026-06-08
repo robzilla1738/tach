@@ -84,6 +84,97 @@ fn fmt_item(item: &Item) -> String {
         Item::Type(t) => fmt_type_decl(t),
         Item::Fn(f) => fmt_fn(f),
         Item::Test(t) => format!("test \"{}\" {}", t.name, fmt_block(&t.body, 0)),
+        Item::Goal(g) => fmt_goal(g),
+    }
+}
+
+/// Render a `goal` to its one canonical shape. Sections appear in a fixed order
+/// (budget, allow, require) and empty sections are omitted, so the same goal
+/// always formats the same way regardless of how it was authored.
+fn fmt_goal(g: &GoalDecl) -> String {
+    let head = match &g.success {
+        Some(s) => format!("goal {} -> {} {{", g.name, s),
+        None => format!("goal {} {{", g.name),
+    };
+    let mut s = head;
+    s.push('\n');
+
+    let b = &g.budget;
+    if b.steps.is_some() || b.retries.is_some() || b.time.is_some() || b.cost.is_some() {
+        s.push_str(&format!("{}budget {{\n", pad(STEP)));
+        if let Some(v) = b.steps {
+            s.push_str(&format!("{}steps: {}\n", pad(STEP * 2), v));
+        }
+        if let Some(v) = b.retries {
+            s.push_str(&format!("{}retries: {}\n", pad(STEP * 2), v));
+        }
+        if let Some(t) = &b.time {
+            s.push_str(&format!("{}time: {}\n", pad(STEP * 2), t));
+        }
+        if let Some(v) = b.cost {
+            s.push_str(&format!("{}cost: {}\n", pad(STEP * 2), v));
+        }
+        s.push_str(&format!("{}}}\n", pad(STEP)));
+    }
+
+    let a = &g.allow;
+    if !a.effects.is_empty()
+        || !a.fs_read.is_empty()
+        || !a.fs_write.is_empty()
+        || !a.shell.is_empty()
+        || !a.tools.is_empty()
+    {
+        s.push_str(&format!("{}allow {{\n", pad(STEP)));
+        for e in &a.effects {
+            s.push_str(&format!("{}effect {}\n", pad(STEP * 2), e.name));
+        }
+        if !a.fs_read.is_empty() {
+            s.push_str(&format!(
+                "{}fs.read {}\n",
+                pad(STEP * 2),
+                fmt_glob_list(&a.fs_read)
+            ));
+        }
+        if !a.fs_write.is_empty() {
+            s.push_str(&format!(
+                "{}fs.write {}\n",
+                pad(STEP * 2),
+                fmt_glob_list(&a.fs_write)
+            ));
+        }
+        if !a.shell.is_empty() {
+            s.push_str(&format!(
+                "{}shell.run {}\n",
+                pad(STEP * 2),
+                fmt_glob_list(&a.shell)
+            ));
+        }
+        for t in &a.tools {
+            s.push_str(&format!("{}{}\n", pad(STEP * 2), t));
+        }
+        s.push_str(&format!("{}}}\n", pad(STEP)));
+    }
+
+    let r = &g.require;
+    if !r.conditions.is_empty() {
+        s.push_str(&format!("{}require {{\n", pad(STEP)));
+        for c in &r.conditions {
+            s.push_str(&format!("{}{}\n", pad(STEP * 2), c.name));
+        }
+        s.push_str(&format!("{}}}\n", pad(STEP)));
+    }
+
+    s.push('}');
+    s
+}
+
+/// A single glob renders bare; several render as a `[...]` list.
+fn fmt_glob_list(globs: &[String]) -> String {
+    if globs.len() == 1 {
+        format!("\"{}\"", escape(&globs[0]))
+    } else {
+        let inner: Vec<String> = globs.iter().map(|g| format!("\"{}\"", escape(g))).collect();
+        format!("[{}]", inner.join(", "))
     }
 }
 
@@ -400,6 +491,7 @@ mod tests {
         for (name, src) in [
             ("main.tach", crate::project::CLEAN_MAIN),
             ("main_test.tach", crate::project::CLEAN_TEST),
+            ("goal.tach", crate::project::DEMO_GOAL),
         ] {
             let out = format_file(name, src).expect("formats");
             assert_eq!(out, src, "{} should be a formatting fixed point", name);

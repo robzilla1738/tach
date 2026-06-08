@@ -134,8 +134,9 @@ impl Parser {
                 Tok::Type => items.push(Item::Type(self.parse_type_decl())),
                 Tok::Fn => items.push(Item::Fn(self.parse_fn())),
                 Tok::Test => items.push(Item::Test(self.parse_test())),
+                Tok::Goal => items.push(Item::Goal(self.parse_goal())),
                 _ => {
-                    self.error_here("expected a top-level item (import, type, fn, or test)");
+                    self.error_here("expected a top-level item (import, type, fn, test, or goal)");
                     self.bump();
                 }
             }
@@ -201,6 +202,263 @@ impl Parser {
         let body = self.parse_block();
         let span = kw.to(body.span);
         TestDecl { name, body, span }
+    }
+
+    // ----- goals -----
+
+    /// Parse a dotted name like `db.read`, `fs.write`, or `tach.check` into a
+    /// single string. Goals describe authority over namespaced tools and effects,
+    /// so a dotted path is the natural identifier there.
+    fn parse_dotted_name(&mut self) -> (String, Span) {
+        let (first, sp0) = self.expect_ident();
+        let mut name = first;
+        let mut span = sp0;
+        while matches!(self.peek(), Tok::Dot) {
+            self.bump();
+            let (seg, sp) = self.expect_ident();
+            name.push('.');
+            name.push_str(&seg);
+            span = span.to(sp);
+        }
+        (name, span)
+    }
+
+    /// One or more glob patterns: either a bare `"glob"` or a `["a", "b"]` list.
+    fn parse_glob_values(&mut self) -> Vec<String> {
+        let mut out = Vec::new();
+        if matches!(self.peek(), Tok::LBracket) {
+            self.bump();
+            self.skip_newlines();
+            while !matches!(self.peek(), Tok::RBracket | Tok::Eof) {
+                if let Tok::Str(s) = self.peek().clone() {
+                    self.bump();
+                    out.push(s);
+                } else {
+                    self.error_here("expected a string glob");
+                    self.bump();
+                }
+                self.skip_newlines();
+                if self.eat(&Tok::Comma) {
+                    self.skip_newlines();
+                }
+            }
+            self.expect(Tok::RBracket);
+        } else if let Tok::Str(s) = self.peek().clone() {
+            self.bump();
+            out.push(s);
+        } else {
+            self.error_here("expected a glob string or a `[...]` list");
+        }
+        out
+    }
+
+    fn parse_goal(&mut self) -> GoalDecl {
+        let kw = self.expect(Tok::Goal);
+        let (name, name_span) = self.expect_ident();
+        let success = if self.eat(&Tok::Arrow) {
+            Some(self.expect_ident().0)
+        } else {
+            None
+        };
+        self.expect(Tok::LBrace);
+        self.skip_newlines();
+        let mut budget = GoalBudget::default();
+        let mut allow = GoalAllow::default();
+        let mut require = GoalRequire::default();
+        while !matches!(self.peek(), Tok::RBrace | Tok::Eof) {
+            let before = self.pos;
+            if let Tok::Ident(section) = self.peek().clone() {
+                let ssp = self.peek_span();
+                self.bump();
+                match section.as_str() {
+                    "budget" => budget = self.parse_goal_budget(ssp),
+                    "allow" => allow = self.parse_goal_allow(ssp),
+                    "require" => require = self.parse_goal_require(ssp),
+                    other => {
+                        self.push_err(
+                            "E0003",
+                            "syntax",
+                            format!(
+                                "unknown goal section `{}` (expected `budget`, `allow`, or `require`)",
+                                other
+                            ),
+                            ssp,
+                        );
+                        self.skip_brace_block();
+                    }
+                }
+            } else {
+                self.error_here("expected a goal section (`budget`, `allow`, or `require`)");
+            }
+            if self.pos == before {
+                self.bump();
+            }
+            self.skip_newlines();
+        }
+        let close = self.expect(Tok::RBrace);
+        GoalDecl {
+            name,
+            name_span,
+            success,
+            budget,
+            allow,
+            require,
+            span: kw.to(close),
+        }
+    }
+
+    fn parse_goal_budget(&mut self, kw: Span) -> GoalBudget {
+        let mut b = GoalBudget {
+            span: kw,
+            ..Default::default()
+        };
+        self.expect(Tok::LBrace);
+        self.skip_newlines();
+        while !matches!(self.peek(), Tok::RBrace | Tok::Eof) {
+            let before = self.pos;
+            let (key, ksp) = self.expect_ident();
+            self.expect(Tok::Colon);
+            b.span = b.span.to(ksp);
+            match key.as_str() {
+                "steps" => b.steps = Some(self.parse_uint()),
+                "retries" => b.retries = Some(self.parse_uint()),
+                "cost" => b.cost = Some(self.parse_signed_int()),
+                "time" => b.time = Some(self.parse_duration_text()),
+                other => {
+                    self.push_err(
+                        "E0003",
+                        "syntax",
+                        format!(
+                            "unknown budget key `{}` (expected `steps`, `retries`, `time`, or `cost`)",
+                            other
+                        ),
+                        ksp,
+                    );
+                    // consume the rest of the line so we can recover.
+                    while !matches!(self.peek(), Tok::Newline | Tok::RBrace | Tok::Eof) {
+                        self.bump();
+                    }
+                }
+            }
+            if self.pos == before {
+                self.bump();
+            }
+            self.skip_newlines();
+        }
+        self.expect(Tok::RBrace);
+        b
+    }
+
+    fn parse_goal_allow(&mut self, kw: Span) -> GoalAllow {
+        let mut a = GoalAllow {
+            span: kw,
+            ..Default::default()
+        };
+        self.expect(Tok::LBrace);
+        self.skip_newlines();
+        while !matches!(self.peek(), Tok::RBrace | Tok::Eof) {
+            let before = self.pos;
+            let (head, hsp) = self.parse_dotted_name();
+            a.span = a.span.to(hsp);
+            match head.as_str() {
+                "effect" => {
+                    // `effect db.read`
+                    let (eff, esp) = self.parse_dotted_name();
+                    a.effects.push(EffectRef {
+                        name: eff,
+                        span: esp,
+                    });
+                }
+                "fs.read" => a.fs_read.extend(self.parse_glob_values()),
+                "fs.write" => a.fs_write.extend(self.parse_glob_values()),
+                "shell.run" => a.shell.extend(self.parse_glob_values()),
+                _ => {
+                    // A bare dotted name is a tool grant, e.g. `tach.check`.
+                    a.tools.push(head);
+                }
+            }
+            if self.pos == before {
+                self.bump();
+            }
+            self.skip_newlines();
+        }
+        self.expect(Tok::RBrace);
+        a
+    }
+
+    fn parse_goal_require(&mut self, kw: Span) -> GoalRequire {
+        let mut r = GoalRequire {
+            span: kw,
+            ..Default::default()
+        };
+        self.expect(Tok::LBrace);
+        self.skip_newlines();
+        while !matches!(self.peek(), Tok::RBrace | Tok::Eof) {
+            let before = self.pos;
+            let (name, sp) = self.parse_dotted_name();
+            r.span = r.span.to(sp);
+            r.conditions.push(RequireCond { name, span: sp });
+            if self.pos == before {
+                self.bump();
+            }
+            self.skip_newlines();
+        }
+        self.expect(Tok::RBrace);
+        r
+    }
+
+    /// Parse an unsigned integer literal, recovering to 0 on anything else.
+    fn parse_uint(&mut self) -> u64 {
+        if let Tok::Int(n) = self.peek().clone() {
+            self.bump();
+            n.max(0) as u64
+        } else {
+            self.error_here("expected a whole number");
+            0
+        }
+    }
+
+    fn parse_signed_int(&mut self) -> i64 {
+        let neg = self.eat(&Tok::Minus);
+        if let Tok::Int(n) = self.peek().clone() {
+            self.bump();
+            if neg {
+                -n
+            } else {
+                n
+            }
+        } else {
+            self.error_here("expected a whole number");
+            0
+        }
+    }
+
+    /// A duration like `20m` or `45` — an integer with an optional unit suffix
+    /// identifier. Stored as raw text; the runtime parses it only when enforcing.
+    fn parse_duration_text(&mut self) -> String {
+        let n = self.parse_uint();
+        let mut s = n.to_string();
+        if let Tok::Ident(unit) = self.peek().clone() {
+            self.bump();
+            s.push_str(&unit);
+        }
+        s
+    }
+
+    /// Skip a balanced `{ ... }` block (used to recover from an unknown section).
+    fn skip_brace_block(&mut self) {
+        if !self.eat(&Tok::LBrace) {
+            return;
+        }
+        let mut depth = 1;
+        while depth > 0 && !matches!(self.peek(), Tok::Eof) {
+            match self.peek() {
+                Tok::LBrace => depth += 1,
+                Tok::RBrace => depth -= 1,
+                _ => {}
+            }
+            self.bump();
+        }
     }
 
     fn parse_fn(&mut self) -> FnDecl {
@@ -905,5 +1163,55 @@ fn describe(p: Parity) -> String {
         assert!(f.brace_offset > 0);
         assert!(f.ret.is_some());
         assert_eq!(f.body.stmts.len(), 3);
+    }
+
+    #[test]
+    fn parses_a_goal_with_every_section() {
+        let src = r#"goal FixFailingTests -> Success {
+  budget {
+    steps: 30
+    retries: 3
+    time: 20m
+    cost: 0
+  }
+  allow {
+    effect db.read
+    effect log.write
+    fs.read "."
+    fs.write ["src/**", "tests/**"]
+    shell.run ["cargo test", "bun test"]
+    tach.check
+  }
+  require {
+    tests.pass
+    no_new_effects
+  }
+}
+"#;
+        let (module, diags) = parse("goal.tach", src);
+        let errs: Vec<_> = diags.iter().filter(|d| d.is_error()).collect();
+        assert!(errs.is_empty(), "unexpected parse errors: {:?}", errs);
+        let g = module
+            .items
+            .iter()
+            .find_map(|i| match i {
+                Item::Goal(g) => Some(g),
+                _ => None,
+            })
+            .expect("goal parsed");
+        assert_eq!(g.name, "FixFailingTests");
+        assert_eq!(g.success.as_deref(), Some("Success"));
+        assert_eq!(g.budget.steps, Some(30));
+        assert_eq!(g.budget.retries, Some(3));
+        assert_eq!(g.budget.time.as_deref(), Some("20m"));
+        assert_eq!(g.budget.cost, Some(0));
+        assert_eq!(g.allow.effects.len(), 2);
+        assert_eq!(g.allow.effects[0].name, "db.read");
+        assert_eq!(g.allow.fs_read, vec!["."]);
+        assert_eq!(g.allow.fs_write, vec!["src/**", "tests/**"]);
+        assert_eq!(g.allow.shell, vec!["cargo test", "bun test"]);
+        assert_eq!(g.allow.tools, vec!["tach.check"]);
+        assert_eq!(g.require.conditions.len(), 2);
+        assert_eq!(g.require.conditions[0].name, "tests.pass");
     }
 }

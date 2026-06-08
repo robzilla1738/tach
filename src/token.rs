@@ -24,6 +24,7 @@ pub enum Tok {
     False,
     Ok,
     Err,
+    Goal,
 
     // punctuation & operators
     LParen,
@@ -84,6 +85,7 @@ impl Tok {
             "false" => Tok::False,
             "Ok" => Tok::Ok,
             "Err" => Tok::Err,
+            "goal" => Tok::Goal,
             _ => return None,
         })
     }
@@ -110,6 +112,7 @@ impl Tok {
             Tok::False => "`false`".into(),
             Tok::Ok => "`Ok`".into(),
             Tok::Err => "`Err`".into(),
+            Tok::Goal => "`goal`".into(),
             Tok::LParen => "`(`".into(),
             Tok::RParen => "`)`".into(),
             Tok::LBrace => "`{`".into(),

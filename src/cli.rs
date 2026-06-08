@@ -6,12 +6,13 @@ use crate::agent::{self, Strategy};
 use crate::ast::Item;
 use crate::check::{self, check_program};
 use crate::diagnostics::Diagnostic;
+use crate::goal::{self, GoalSpec};
 use crate::interp::{Interp, Signal};
 use crate::patch::Workspace;
 use crate::program::Program;
 use crate::runner::run_tests;
 use crate::trace::{self, TraceFile};
-use crate::{builtins, fmt, project, render, term};
+use crate::{builtins, event, fmt, project, render, runtime, schema, store, term};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -32,6 +33,10 @@ pub fn run(args: Vec<String>) -> i32 {
         "replay" => cmd_replay(&rest),
         "bench" => cmd_bench(&rest),
         "audit" => cmd_audit(&rest),
+        "goal" => cmd_goal(&rest),
+        "doctor" => cmd_doctor(&rest),
+        "explain" => cmd_explain(&rest),
+        "schema" => cmd_schema(&rest),
         "version" | "--version" | "-V" => {
             println!("tach {}", env!("CARGO_PKG_VERSION"));
             0
@@ -759,6 +764,578 @@ fn cmd_audit(rest: &[String]) -> i32 {
     0
 }
 
+// ----- goal runtime -----
+
+/// Exit code used when a run stops on a simulated crash (`--crash-after`). It is
+/// non-zero (the run did not finish) but distinct from a real failure, so scripts
+/// and the demo can tell "crashed, resume me" apart from "the goal failed".
+const CRASH_EXIT: i32 = 99;
+
+fn cmd_goal(rest: &[String]) -> i32 {
+    let (sub, rest) = match rest.split_first() {
+        Some((s, r)) => (s.as_str(), r.to_vec()),
+        None => ("", Vec::new()),
+    };
+    match sub {
+        "run" => cmd_goal_run(&rest),
+        "list" => cmd_goal_list(&rest),
+        "inspect" => cmd_goal_inspect(&rest),
+        "resume" => cmd_goal_resume(&rest),
+        "replay" => cmd_goal_replay(&rest),
+        "cancel" => cmd_goal_cancel(&rest),
+        "" => cmd_goal_overview(),
+        other => {
+            eprintln!(
+                "{} unknown `tach goal` subcommand `{}`",
+                term::bold_red("error:"),
+                other
+            );
+            print_goal_help();
+            2
+        }
+    }
+}
+
+/// `tach goal` with no subcommand: list the goals declared in this workspace.
+fn cmd_goal_overview() -> i32 {
+    let ws = match project::load_workspace(&cwd()) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("{} {}", term::bold_red("error:"), e);
+            return 1;
+        }
+    };
+    let (prog, _) = ws.program();
+    let goals = goal::all_goals(&prog);
+    if goals.is_empty() {
+        println!("  {} no goals declared in this workspace", term::dim("·"));
+        print_goal_help();
+        return 0;
+    }
+    println!("{}", term::bold("goals in this workspace"));
+    println!();
+    for g in goals {
+        let spec = GoalSpec::from_decl(g);
+        println!(
+            "  {}  {}",
+            term::bold(&g.name),
+            term::dim(&format!(
+                "budget {} steps · {} effect(s) · require [{}]",
+                spec.step_budget(),
+                spec.allow.effects.len(),
+                spec.require.join(", ")
+            ))
+        );
+    }
+    println!();
+    println!("  run one with  {}", term::bold("tach goal run <name>"));
+    0
+}
+
+fn parse_crash_after(p: &Parsed) -> Option<u64> {
+    // Accept `--crash-after step:3` or `--crash-after 3`.
+    let raw = p.get("--crash-after")?;
+    let n = raw.strip_prefix("step:").unwrap_or(raw);
+    n.parse().ok()
+}
+
+fn cmd_goal_run(rest: &[String]) -> i32 {
+    let p = parse(rest, &["--strategy", "--crash-after"]);
+    let name = match p.pos.first() {
+        Some(n) => n.clone(),
+        None => {
+            eprintln!(
+                "{} usage: tach goal run <name> [--strategy s] [--crash-after step:N]",
+                term::bold_red("error:")
+            );
+            return 2;
+        }
+    };
+    let strat = strategy_from_flag(p.get("--strategy"));
+    let crash_after = parse_crash_after(&p);
+    let dry = p.has("--dry-run");
+    let root = cwd();
+
+    let ws = match project::load_workspace(&root) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("{} {}", term::bold_red("error:"), e);
+            return 1;
+        }
+    };
+    let (prog, _) = ws.program();
+    let decl = match goal::find_goal(&prog, &name) {
+        Some(g) => g,
+        None => {
+            eprintln!(
+                "{} no goal named `{}` in this workspace",
+                term::bold_red("error:"),
+                name
+            );
+            let names: Vec<String> = goal::all_goals(&prog)
+                .iter()
+                .map(|g| g.name.clone())
+                .collect();
+            if !names.is_empty() {
+                eprintln!("  available goals: {}", names.join(", "));
+            }
+            return 1;
+        }
+    };
+    let spec = GoalSpec::from_decl(decl);
+
+    let result = match runtime::start_run(&root, spec, ws, strat, crash_after) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("{} {}", term::bold_red("error:"), e);
+            return 1;
+        }
+    };
+    finish_run(&root, result, dry)
+}
+
+fn cmd_goal_resume(rest: &[String]) -> i32 {
+    let p = parse(rest, &["--crash-after"]);
+    let id = match p.pos.first() {
+        Some(i) => i.clone(),
+        None => {
+            eprintln!(
+                "{} usage: tach goal resume <run-id>",
+                term::bold_red("error:")
+            );
+            return 2;
+        }
+    };
+    let crash_after = parse_crash_after(&p);
+    let dry = p.has("--dry-run");
+    let root = cwd();
+
+    let state = match store::load_state(&root, &id) {
+        Ok(s) => s,
+        Err(_) => {
+            eprintln!(
+                "{} no run `{}` in the goal store",
+                term::bold_red("error:"),
+                id
+            );
+            return 1;
+        }
+    };
+    if matches!(state.status.as_str(), "completed" | "cancelled") {
+        println!(
+            "  {} run `{}` is already {} — nothing to resume",
+            term::dim("·"),
+            id,
+            state.status
+        );
+        return 0;
+    }
+
+    let result = match runtime::resume_run(&root, &id, crash_after) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("{} {}", term::bold_red("error:"), e);
+            return 1;
+        }
+    };
+    finish_run(&root, result, dry)
+}
+
+/// Shared tail for `run`/`resume`: print the outcome, write verified files back on
+/// success, and choose an honest exit code.
+fn finish_run(root: &Path, result: runtime::RunResult, dry: bool) -> i32 {
+    let st = &result.state;
+    print!("{}", render::run_state(st));
+
+    if result.crashed {
+        println!(
+            "\n  {} crashed after step {} (simulated). State is durable.",
+            term::bold_yellow("✗"),
+            st.step
+        );
+        println!(
+            "  resume with  {}",
+            term::bold(&format!("tach goal resume {}", st.run_id))
+        );
+        return CRASH_EXIT;
+    }
+
+    match st.status.as_str() {
+        "completed" => {
+            if dry {
+                println!("\n  {} dry run — no files written", term::dim("·"));
+            } else if let Ok(record) = store::load_goal(root, &st.run_id) {
+                match project::write_back(root, &record.base_files, &result.final_files) {
+                    Ok(changed) if !changed.is_empty() => {
+                        println!("\n  {} updated {}", term::green("✓"), changed.join(", "));
+                    }
+                    Ok(_) => {}
+                    Err(e) => eprintln!("{} {}", term::bold_red("write error:"), e),
+                }
+            }
+            0
+        }
+        _ => 1,
+    }
+}
+
+fn cmd_goal_list(_rest: &[String]) -> i32 {
+    let root = cwd();
+    let ids = store::list_runs(&root);
+    if ids.is_empty() {
+        println!(
+            "  {} no goal runs yet — start one with `tach goal run <name>`",
+            term::dim("·")
+        );
+        return 0;
+    }
+    println!("{}", term::bold("goal runs"));
+    println!();
+    let (h_run, h_status, h_step, h_goal) = ("run", "status", "step", "goal");
+    println!("  {:<22} {:<14} {:>5}  {}", h_run, h_status, h_step, h_goal);
+    for id in &ids {
+        if let Ok(s) = store::load_state(&root, id) {
+            println!(
+                "  {:<22} {} {:<12} {:>5}  {}",
+                id,
+                render::status_dot(&s.status),
+                s.status,
+                s.step,
+                s.goal
+            );
+        }
+    }
+    0
+}
+
+fn cmd_goal_inspect(rest: &[String]) -> i32 {
+    let p = parse(rest, &[]);
+    let root = cwd();
+    let id = match p.pos.first() {
+        Some(i) => i.clone(),
+        None => {
+            eprintln!(
+                "{} usage: tach goal inspect <run-id>",
+                term::bold_red("error:")
+            );
+            return 2;
+        }
+    };
+    let state = match store::load_state(&root, &id) {
+        Ok(s) => s,
+        Err(_) => {
+            eprintln!(
+                "{} no run `{}` in the goal store",
+                term::bold_red("error:"),
+                id
+            );
+            return 1;
+        }
+    };
+    let events = event::read_all(&store::events_path(&root, &id)).unwrap_or_default();
+    if p.has("--json") {
+        let record = store::load_goal(&root, &id).ok();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "goal": record.map(|r| r.spec),
+                "state": state,
+                "events": events,
+            }))
+            .unwrap_or_default()
+        );
+        return 0;
+    }
+    print!("{}", render::run_state(&state));
+    print!("{}", render::events(&events));
+    0
+}
+
+fn cmd_goal_replay(rest: &[String]) -> i32 {
+    let p = parse(rest, &[]);
+    let root = cwd();
+    let id = match p.pos.first() {
+        Some(i) => i.clone(),
+        None => {
+            eprintln!(
+                "{} usage: tach goal replay <run-id>",
+                term::bold_red("error:")
+            );
+            return 2;
+        }
+    };
+    match runtime::replay_run(&root, &id) {
+        Ok(r) => {
+            if r.identical {
+                println!(
+                    "  {} replay reproduced the run exactly — {} step(s), {}",
+                    term::bold_green("●"),
+                    r.steps,
+                    r.replayed_status
+                );
+                0
+            } else {
+                println!(
+                    "  {} replay diverged — recorded `{}`, replayed `{}`",
+                    term::bold_red("●"),
+                    r.recorded_status,
+                    r.replayed_status
+                );
+                1
+            }
+        }
+        Err(e) => {
+            eprintln!("{} {}", term::bold_red("error:"), e);
+            1
+        }
+    }
+}
+
+fn cmd_goal_cancel(rest: &[String]) -> i32 {
+    let p = parse(rest, &[]);
+    let root = cwd();
+    let id = match p.pos.first() {
+        Some(i) => i.clone(),
+        None => {
+            eprintln!(
+                "{} usage: tach goal cancel <run-id>",
+                term::bold_red("error:")
+            );
+            return 2;
+        }
+    };
+    match runtime::cancel_run(&root, &id) {
+        Ok(s) => {
+            println!("  {} run `{}` is now {}", term::green("✓"), id, s.status);
+            0
+        }
+        Err(_) => {
+            eprintln!(
+                "{} no run `{}` in the goal store",
+                term::bold_red("error:"),
+                id
+            );
+            1
+        }
+    }
+}
+
+fn strategy_from_flag(flag: Option<&str>) -> Strategy {
+    match flag {
+        Some("convert") => Strategy::Convert,
+        Some("strict") => Strategy::Strict,
+        _ => Strategy::Minimal,
+    }
+}
+
+fn print_goal_help() {
+    let b = |s: &str| term::bold(s);
+    println!();
+    println!("{}", b("GOAL SUBCOMMANDS"));
+    let cmd = |name: &str, desc: &str| println!("  {:<28} {}", name, term::dim(desc));
+    cmd(
+        "goal run <name>",
+        "start a durable run (--strategy, --crash-after step:N)",
+    );
+    cmd("goal list", "list runs in the store");
+    cmd(
+        "goal inspect <id>",
+        "show a run's state + event history (--json)",
+    );
+    cmd(
+        "goal resume <id>",
+        "resume a crashed/incomplete run from its last checkpoint",
+    );
+    cmd(
+        "goal replay <id>",
+        "re-run from base and prove it reproduces",
+    );
+    cmd("goal cancel <id>", "cancel a run");
+}
+
+// ----- doctor / explain / schema -----
+
+fn cmd_doctor(_rest: &[String]) -> i32 {
+    let root = cwd();
+    println!("{}", term::bold("tach doctor"));
+    println!(
+        "  {}",
+        term::dim("a hermetic health check — no network, no clock, no services")
+    );
+    println!();
+
+    let mut problems = 0;
+    let ok = |label: &str, detail: String| {
+        println!(
+            "  {} {:<22} {}",
+            term::green("✓"),
+            label,
+            term::dim(&detail)
+        );
+    };
+    let warn = |label: &str, detail: String| {
+        println!("  {} {:<22} {}", term::bold_yellow("!"), label, detail);
+    };
+
+    ok("version", format!("tach {}", env!("CARGO_PKG_VERSION")));
+    ok(
+        "determinism",
+        "fixed clock, no randomness, byte-exact replay".into(),
+    );
+
+    match project::load_workspace(&root) {
+        Ok(ws) if ws.files.is_empty() => {
+            warn("workspace", "no .tach files found here".into());
+        }
+        Ok(ws) => {
+            ok("workspace", format!("{} .tach file(s)", ws.files.len()));
+            let (prog, pdiags) = ws.program();
+            let errs = pdiags.iter().filter(|d| d.is_error()).count()
+                + check_program(&prog).iter().filter(|d| d.is_error()).count();
+            if errs == 0 {
+                ok("check", "no errors".into());
+            } else {
+                warn("check", format!("{} error(s) — run `tach check`", errs));
+                problems += 1;
+            }
+            let goals = goal::all_goals(&prog).len();
+            ok("goals", format!("{} declared", goals));
+        }
+        Err(e) => {
+            warn("workspace", format!("could not load: {}", e));
+            problems += 1;
+        }
+    }
+
+    // The store directory must be writable for goal runs to be durable.
+    let tach_dir = root.join(".tach");
+    match std::fs::create_dir_all(&tach_dir) {
+        Ok(_) => ok("store", ".tach is writable".into()),
+        Err(e) => {
+            warn("store", format!(".tach not writable: {}", e));
+            problems += 1;
+        }
+    }
+
+    let runs = store::list_runs(&root).len();
+    ok("goal runs", format!("{} in the store", runs));
+
+    println!();
+    if problems == 0 {
+        println!("  {} everything looks healthy", term::bold_green("●"));
+        0
+    } else {
+        println!(
+            "  {} {} thing(s) need attention",
+            term::bold_yellow("●"),
+            problems
+        );
+        1
+    }
+}
+
+fn cmd_explain(rest: &[String]) -> i32 {
+    let p = parse(rest, &[]);
+    let code = match p.pos.first() {
+        Some(c) => c.to_uppercase(),
+        None => {
+            eprintln!(
+                "{} usage: tach explain <diagnostic-code>  e.g. tach explain E0421",
+                term::bold_red("error:")
+            );
+            return 2;
+        }
+    };
+    match explanation(&code) {
+        Some((title, body)) => {
+            println!("{}  {}", term::bold(&code), term::bold(title));
+            println!();
+            for line in body.lines() {
+                println!("  {}", line);
+            }
+            0
+        }
+        None => {
+            eprintln!("{} no explanation for `{}`", term::bold_red("error:"), code);
+            eprintln!("  known codes: {}", EXPLAINED_CODES.join(", "));
+            1
+        }
+    }
+}
+
+const EXPLAINED_CODES: &[&str] = &["E0309", "E0322", "E0421", "E0431", "E0432"];
+
+/// Long-form explanations for the diagnostics an agent (or a human) most often
+/// meets. Each pairs the *why* with the repair the compiler already proposes.
+fn explanation(code: &str) -> Option<(&'static str, &'static str)> {
+    Some(match code {
+        "E0309" => (
+            "type_mismatch",
+            "An expression's type does not match the type required in its position —\n\
+             for example a function annotated `-> String` whose body returns an `Int`.\n\n\
+             The diagnostic carries a `preferred_patch` that repairs the smaller side:\n\
+             usually the annotation. The `convert` repair strategy instead wraps the\n\
+             value (e.g. `to_string(x)`), which `tach race` can weigh against the minimal fix.",
+        ),
+        "E0322" => (
+            "unknown_module",
+            "A builtin module (`db`, `time`, `log`, `net`, `math`) is used in this file\n\
+             but never imported. Every builtin a body touches must be imported in that file.\n\n\
+             The preferred patch inserts the missing `import` at the top of the file.",
+        ),
+        "E0421" => (
+            "effect_undeclared",
+            "A function performs an effect (such as `db.read` or `log.write`) that its\n\
+             signature does not declare. Effects are part of a function's contract: the\n\
+             checker reconciles what a body *does* with what it *says*.\n\n\
+             The preferred patch rewrites the `effects [...]` clause to the union of the\n\
+             declared and performed effects — or inserts a fresh clause if none exists.\n\
+             In a goal run, only effects the goal's `allow` block grants may appear here.",
+        ),
+        "E0431" => (
+            "unknown_require_condition",
+            "A goal's `require { ... }` block names a success condition the runtime cannot\n\
+             evaluate, so the goal could never be satisfied.\n\n\
+             Use one of: tests.pass, no_new_effects, no_forbidden_effects, check.clean.",
+        ),
+        "E0432" => (
+            "goal_unbounded",
+            "A goal declares no `steps` or `retries` budget, so a run could loop without a\n\
+             bound. Long-horizon runs must be bounded.\n\n\
+             Add a `budget { steps: N }` block (and optionally `retries: N`).",
+        ),
+        _ => return None,
+    })
+}
+
+fn cmd_schema(rest: &[String]) -> i32 {
+    let p = parse(rest, &[]);
+    match p.pos.first() {
+        None => {
+            println!("{}", term::bold("published schemas"));
+            println!();
+            for s in schema::SCHEMAS {
+                println!("  {:<12} {}", term::bold(s.name), term::dim(s.title));
+            }
+            println!();
+            println!("  print one with  {}", term::bold("tach schema <name>"));
+            0
+        }
+        Some(name) => match schema::get(name) {
+            Some(s) => {
+                println!("{}", s.json);
+                0
+            }
+            None => {
+                eprintln!("{} no schema named `{}`", term::bold_red("error:"), name);
+                let names: Vec<&str> = schema::SCHEMAS.iter().map(|s| s.name).collect();
+                eprintln!("  available: {}", names.join(", "));
+                1
+            }
+        },
+    }
+}
+
 fn describe_signal(s: Signal) -> String {
     match s {
         Signal::Error(m, _) => m,
@@ -772,9 +1349,12 @@ fn print_help() {
     let b = |s: &str| term::bold(s);
     println!(
         "{}",
-        term::bold("tach — the fast language for coding agents")
+        term::bold("tach — a typed goal runtime for long-horizon agents")
     );
-    println!("{}", term::dim("prompt-to-passing-tests at compiled speed"));
+    println!(
+        "{}",
+        term::dim("the fastest path from a failing goal to a verified result")
+    );
     println!();
     println!("{}", b("USAGE"));
     println!("  tach <command> [args]");
@@ -810,6 +1390,22 @@ fn print_help() {
         "report agent-loop metrics (time-to-green, laps, ...); --suite <dir>",
     );
     cmd("audit [file]", "show every function's effect surface");
+    cmd(
+        "goal <sub>",
+        "the durable goal runtime: run, list, inspect, resume, replay, cancel",
+    );
+    cmd(
+        "doctor",
+        "hermetic health check of the toolchain + workspace",
+    );
+    cmd(
+        "explain <code>",
+        "long-form explanation of a diagnostic code",
+    );
+    cmd(
+        "schema [name]",
+        "print a versioned JSON schema for machine output",
+    );
     cmd("version", "print the version");
     println!();
     println!("{}", b("EXAMPLE"));
@@ -819,4 +1415,18 @@ fn print_help() {
         term::dim("# 3 structured diagnostics")
     );
     println!("  tach fix          {}", term::dim("# green in 3 laps"));
+    println!();
+    println!("{}", b("GOAL RUNTIME"));
+    println!(
+        "  tach goal run FixFailingTests --crash-after step:2   {}",
+        term::dim("# durable, crashes mid-run")
+    );
+    println!(
+        "  tach goal resume <id>                                {}",
+        term::dim("# picks up — no repeated work")
+    );
+    println!(
+        "  tach goal inspect <id>                               {}",
+        term::dim("# state + event history")
+    );
 }

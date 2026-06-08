@@ -37,8 +37,19 @@ jobs:
       - name: End-to-end demo (red → green)
         run: bash scripts/e2e.sh
 
+      - name: End-to-end goal runtime (crash → resume → replay)
+        run: bash scripts/goal_e2e.sh
+
       - name: Tach format check (corpus)
         run: |
           for d in corpus/*/; do
             ( cd "$d" && "$GITHUB_WORKSPACE/target/release/tach" fmt --check )
           done
+
+      - name: Schemas are valid JSON and match emitted samples
+        run: |
+          BIN="$GITHUB_WORKSPACE/target/release/tach"
+          for name in diagnostic patch event goal run bench test; do
+            "$BIN" schema "$name" | python3 -c 'import sys, json; json.load(sys.stdin)'
+          done
+          echo "all published schemas are valid JSON"

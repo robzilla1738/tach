@@ -1,11 +1,14 @@
-//! Tach — the fast language for coding agents.
+//! Tach — a typed goal runtime for long-horizon agents.
 //!
-//! Tach is a small compiled language whose toolchain is built to cooperate with the
-//! agentic coding loop: prompt -> patch -> compile -> test -> repair -> merge.
+//! Tach gives an agent's goals a typed, deterministic, auditable control plane:
+//! goal -> budget -> authority -> diagnostic -> typed patch -> verify -> checkpoint
+//! -> resume -> trace.
 //!
-//! The headline idea: the compiler is also an agent harness. Every diagnostic carries
-//! a machine-applicable repair (`preferred_patch`), so an agent — even a deterministic
-//! one — can drive a failing project to green without guessing.
+//! The foundation is a small compiled language whose compiler is also an agent
+//! harness: every diagnostic carries a machine-applicable repair (`preferred_patch`),
+//! so an agent — even a deterministic one — can drive a failing project to green
+//! without guessing. The goal runtime wraps that loop in durability: budgets,
+//! authority scopes, append-only event history, checkpoints, resume, and replay.
 
 pub mod agent;
 pub mod ast;
@@ -13,7 +16,9 @@ pub mod builtins;
 pub mod check;
 pub mod cli;
 pub mod diagnostics;
+pub mod event;
 pub mod fmt;
+pub mod goal;
 pub mod interp;
 pub mod lexer;
 pub mod parser;
@@ -22,8 +27,11 @@ pub mod program;
 pub mod project;
 pub mod render;
 pub mod runner;
+pub mod runtime;
+pub mod schema;
 pub mod source;
 pub mod span;
+pub mod store;
 pub mod term;
 pub mod token;
 pub mod trace;

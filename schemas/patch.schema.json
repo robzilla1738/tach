@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tach.dev/schemas/patch.schema.json",
+  "title": "Tach Patch",
+  "description": "A typed patch: a scoped, named, justified bundle of edits with proof obligations the verification pipeline discharges before the patch is allowed to touch the repo. This is the shape a fixture coder authors.",
+  "type": "object",
+  "required": ["name", "reason", "touches", "edits", "prove"],
+  "additionalProperties": false,
+  "properties": {
+    "name": { "type": "string" },
+    "reason": { "type": "string" },
+    "touches": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Glob patterns the patch is permitted to touch."
+    },
+    "edits": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["file", "span", "replacement"],
+        "additionalProperties": false,
+        "properties": {
+          "file": { "type": "string" },
+          "span": {
+            "type": "object",
+            "required": ["start", "end"],
+            "additionalProperties": false,
+            "properties": {
+              "start": { "type": "integer", "minimum": 0 },
+              "end": { "type": "integer", "minimum": 0 }
+            }
+          },
+          "replacement": { "type": "string" }
+        }
+      }
+    },
+    "prove": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Human-facing proof obligations, e.g. `tach check`, `tach test`."
+    }
+  }
+}

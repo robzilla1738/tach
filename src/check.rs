@@ -57,6 +57,16 @@ pub fn check_program(program: &Program) -> Vec<Diagnostic> {
             }
         }
 
+        // --- unused imports: a module imported but never referenced by any body
+        // in this file. A lint, not an error.
+        for item in &unit.module.items {
+            if let Item::Import(im) = item {
+                if !file_modules.contains_key(&im.module) {
+                    diags.push(unused_import_diag(unit, im));
+                }
+            }
+        }
+
         // --- per-function effect + type checks, plus field-access checks over
         // every body (functions and tests).
         for item in &unit.module.items {
@@ -70,10 +80,12 @@ pub fn check_program(program: &Program) -> Vec<Diagnostic> {
                         .map(|p| (p.name.clone(), type_from_ast(&p.ty)))
                         .collect();
                     check_block_fields(&f.body, &mut env, unit, &reg, &sigs, &mut diags);
+                    check_unused_vars(&f.body, unit, &mut diags);
                 }
                 Item::Test(t) => {
                     let mut env: HashMap<String, Type> = HashMap::new();
                     check_block_fields(&t.body, &mut env, unit, &reg, &sigs, &mut diags);
+                    check_unused_vars(&t.body, unit, &mut diags);
                 }
                 _ => {}
             }
@@ -573,6 +585,154 @@ fn edit_distance(a: &str, b: &str) -> usize {
     prev[b.len()]
 }
 
+// ----- unused-import / unused-variable lints -----
+
+fn unused_import_diag(unit: &Unit, im: &Import) -> Diagnostic {
+    // Remove the whole line, trailing newline included, so no blank line is left.
+    let text = &unit.source.text;
+    let after = im.span.end.min(text.len());
+    let line_end = text[after..]
+        .find('\n')
+        .map(|i| after + i + 1)
+        .unwrap_or(text.len());
+    Diagnostic::warning(
+        "E0460",
+        "unused_import",
+        format!("module `{}` is imported but never used", im.module),
+        &unit.source.path,
+        im.span,
+    )
+    .with_strategies(&["remove_import"])
+    .with_patch(PreferredPatch {
+        file: unit.source.path.clone(),
+        span: Span::new(im.span.start, line_end),
+        replacement: String::new(),
+        rationale: format!("remove the unused `import {}`", im.module),
+    })
+    .with_note("an unused import widens a file's apparent surface for no reason")
+}
+
+/// Flag `let` bindings never referenced in the body. The repair prefixes `_`
+/// rather than deleting the binding — that silences the lint while preserving any
+/// effect the right-hand side performs, so the patch can never change behavior.
+fn check_unused_vars(b: &Block, unit: &Unit, diags: &mut Vec<Diagnostic>) {
+    let refs = referenced_idents(b);
+    collect_unused_lets(b, &refs, unit, diags);
+}
+
+fn collect_unused_lets(
+    b: &Block,
+    refs: &BTreeSet<String>,
+    unit: &Unit,
+    diags: &mut Vec<Diagnostic>,
+) {
+    for s in &b.stmts {
+        match s {
+            Stmt::Let {
+                name, name_span, ..
+            } => {
+                if !name.starts_with('_') && !refs.contains(name) {
+                    diags.push(unused_variable_diag(unit, name, *name_span));
+                }
+            }
+            Stmt::If { then, els, .. } => {
+                collect_unused_lets(then, refs, unit, diags);
+                if let Some(eb) = els {
+                    collect_unused_lets(eb, refs, unit, diags);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn unused_variable_diag(unit: &Unit, name: &str, name_span: Span) -> Diagnostic {
+    Diagnostic::warning(
+        "E0461",
+        "unused_variable",
+        format!("variable `{}` is never used", name),
+        &unit.source.path,
+        name_span,
+    )
+    .with_strategies(&["underscore_prefix"])
+    .with_patch(PreferredPatch {
+        file: unit.source.path.clone(),
+        span: name_span,
+        replacement: format!("_{}", name),
+        rationale: format!("prefix with `_` to mark `{}` intentionally unused", name),
+    })
+}
+
+/// Every identifier *referenced* anywhere in a block. A `let` binding's own name
+/// is not a reference (it lives in `Stmt::Let.name`, not an `Expr::Ident`), so a
+/// binding that never appears here is genuinely unused.
+fn referenced_idents(b: &Block) -> BTreeSet<String> {
+    fn we(e: &Expr, out: &mut BTreeSet<String>) {
+        match e {
+            Expr::Ident(n, _) => {
+                out.insert(n.clone());
+            }
+            Expr::Unary { expr, .. } | Expr::Try { expr, .. } => we(expr, out),
+            Expr::Binary { lhs, rhs, .. } => {
+                we(lhs, out);
+                we(rhs, out);
+            }
+            Expr::Call { callee, args, .. } => {
+                we(callee, out);
+                for a in args {
+                    we(a, out);
+                }
+            }
+            Expr::Method { recv, args, .. } => {
+                we(recv, out);
+                for a in args {
+                    we(a, out);
+                }
+            }
+            Expr::Field { recv, .. } => we(recv, out),
+            Expr::Ok(e, _) | Expr::Err(e, _) => we(e, out),
+            Expr::Record { fields, .. } => {
+                for (_, fe) in fields {
+                    we(fe, out);
+                }
+            }
+            Expr::Int(..) | Expr::Float(..) | Expr::Str(..) | Expr::Bool(..) => {}
+        }
+    }
+    fn ws(s: &Stmt, out: &mut BTreeSet<String>) {
+        match s {
+            Stmt::Let { value, .. } => we(value, out),
+            Stmt::Return { value: Some(e), .. } => we(e, out),
+            Stmt::Return { value: None, .. } => {}
+            Stmt::Ensure { cond, els, .. } => {
+                we(cond, out);
+                if let Some(e) = els {
+                    we(e, out);
+                }
+            }
+            Stmt::If {
+                cond, then, els, ..
+            } => {
+                we(cond, out);
+                for st in &then.stmts {
+                    ws(st, out);
+                }
+                if let Some(eb) = els {
+                    for st in &eb.stmts {
+                        ws(st, out);
+                    }
+                }
+            }
+            Stmt::Expr(e) => we(e, out),
+        }
+    }
+    let mut out = BTreeSet::new();
+    for s in &b.stmts {
+        ws(s, &mut out);
+    }
+    out
+}
+
 // ----- shared body walker -----
 
 fn analyze_block(b: &Block, sigs: &HashMap<String, FnSig>) -> Usage {
@@ -898,6 +1058,68 @@ fn summary(s: Session) -> Int {
         assert!(
             !diags.iter().any(|d| d.kind == "unknown_field"),
             "no unknown_field on Unknown-typed receivers: {:?}",
+            diags
+        );
+    }
+
+    const UNUSED_IMPORT: &str = "\nimport math\n\nfn double(x: Int) -> Int {\n  return x\n}\n";
+
+    #[test]
+    fn unused_import_is_removed() {
+        let (prog, _) = Program::parse_sources(vec![SourceFile::new("m.tach", UNUSED_IMPORT)]);
+        let diags = check_program(&prog);
+        let d = diags
+            .iter()
+            .find(|d| d.kind == "unused_import")
+            .expect("an unused_import warning");
+        assert_eq!(d.code, "E0460");
+        assert!(!d.is_error(), "unused_import is a lint, not an error");
+        let patch = d.preferred_patch.as_ref().expect("a remove patch");
+        assert_eq!(patch.replacement, "");
+        // the patch deletes exactly the import line, trailing newline included.
+        assert_eq!(
+            &UNUSED_IMPORT[patch.span.start..patch.span.end],
+            "import math\n"
+        );
+    }
+
+    const UNUSED_VAR: &str = r#"
+fn compute(x: Int) -> Int {
+  let scratch = x
+  return x
+}
+"#;
+
+    #[test]
+    fn unused_variable_gets_underscore() {
+        let (prog, _) = Program::parse_sources(vec![SourceFile::new("m.tach", UNUSED_VAR)]);
+        let diags = check_program(&prog);
+        let d = diags
+            .iter()
+            .find(|d| d.kind == "unused_variable")
+            .expect("an unused_variable warning");
+        assert_eq!(d.code, "E0461");
+        assert!(!d.is_error());
+        let patch = d.preferred_patch.as_ref().expect("an underscore patch");
+        assert_eq!(patch.replacement, "_scratch");
+        assert_eq!(&UNUSED_VAR[patch.span.start..patch.span.end], "scratch");
+    }
+
+    #[test]
+    fn used_variable_and_underscore_are_not_flagged() {
+        // a referenced binding, and an already-underscored one, are both fine.
+        const OK: &str = r#"
+fn compute(x: Int) -> Int {
+  let y = x
+  let _ignored = x
+  return y
+}
+"#;
+        let (prog, _) = Program::parse_sources(vec![SourceFile::new("m.tach", OK)]);
+        let diags = check_program(&prog);
+        assert!(
+            !diags.iter().any(|d| d.kind == "unused_variable"),
+            "no unused_variable expected: {:?}",
             diags
         );
     }

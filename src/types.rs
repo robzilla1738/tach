@@ -47,6 +47,10 @@ impl Type {
 /// recognized; everything else becomes `Named`.
 pub fn type_from_ast(t: &TypeExpr) -> Type {
     match t {
+        // A sum type only appears as the right-hand side of a `type` decl, where
+        // `TypeRegistry::add_decl` registers it by name; as a bare type position
+        // it carries no name, so it resolves to the lenient `Unknown`.
+        TypeExpr::Sum { .. } => Type::Unknown,
         TypeExpr::Record { fields, .. } => Type::Record(
             fields
                 .iter()
@@ -74,6 +78,10 @@ pub fn type_from_ast(t: &TypeExpr) -> Type {
 #[derive(Clone, Debug, Default)]
 pub struct TypeRegistry {
     records: HashMap<String, Vec<(String, Type)>>,
+    /// enum name -> its variant names, in declaration order.
+    enums: HashMap<String, Vec<String>>,
+    /// variant name -> the enum that declares it (last declaration wins).
+    variant_of: HashMap<String, String>,
 }
 
 impl TypeRegistry {
@@ -82,8 +90,20 @@ impl TypeRegistry {
     }
 
     pub fn add_decl(&mut self, d: &TypeDecl) {
-        if let Type::Record(fields) = type_from_ast(&d.ty) {
-            self.records.insert(d.name.clone(), fields);
+        match &d.ty {
+            TypeExpr::Record { .. } => {
+                if let Type::Record(fields) = type_from_ast(&d.ty) {
+                    self.records.insert(d.name.clone(), fields);
+                }
+            }
+            TypeExpr::Sum { variants, .. } => {
+                let names: Vec<String> = variants.iter().map(|v| v.name.clone()).collect();
+                for v in &names {
+                    self.variant_of.insert(v.clone(), d.name.clone());
+                }
+                self.enums.insert(d.name.clone(), names);
+            }
+            TypeExpr::Name { .. } => {}
         }
     }
 
@@ -93,6 +113,25 @@ impl TypeRegistry {
 
     pub fn is_known(&self, name: &str) -> bool {
         self.records.contains_key(name)
+    }
+
+    /// The variants of an enum type, in declaration order.
+    pub fn enum_variants(&self, name: &str) -> Option<&Vec<String>> {
+        self.enums.get(name)
+    }
+
+    /// The enum that declares a given variant name, if any.
+    pub fn enum_of_variant(&self, variant: &str) -> Option<&String> {
+        self.variant_of.get(variant)
+    }
+
+    pub fn is_enum(&self, name: &str) -> bool {
+        self.enums.contains_key(name)
+    }
+
+    /// Every variant name known to the program (across all enums).
+    pub fn variants(&self) -> std::collections::HashSet<String> {
+        self.variant_of.keys().cloned().collect()
     }
 }
 

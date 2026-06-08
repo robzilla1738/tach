@@ -136,6 +136,7 @@ pub fn lex(file: &str, src: &str) -> (Vec<Token>, Vec<Diagnostic>) {
                     let c2 = chars[i + 1].1;
                     match (c, c2) {
                         ('-', '>') => Some((Tok::Arrow, 2)),
+                        ('=', '>') => Some((Tok::FatArrow, 2)),
                         ('=', '=') => Some((Tok::EqEq, 2)),
                         ('!', '=') => Some((Tok::NotEq, 2)),
                         ('<', '=') => Some((Tok::LtEq, 2)),
@@ -182,6 +183,7 @@ pub fn lex(file: &str, src: &str) -> (Vec<Token>, Vec<Diagnostic>) {
                         '*' => Tok::Star,
                         '/' => Tok::Slash,
                         '!' => Tok::Bang,
+                        '|' => Tok::Pipe,
                         other => {
                             let span = Span::new(off, end_off(i + 1));
                             diags.push(Diagnostic::error(

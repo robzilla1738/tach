@@ -77,6 +77,9 @@ impl Env {
 /// metrics trustworthy.
 pub struct Interp<'a> {
     funcs: HashMap<String, &'a FnDecl>,
+    /// Every sum-type variant name in the program — an identifier that names one
+    /// (and isn't shadowed by a local) evaluates to a `Value::Variant`.
+    variants: std::collections::HashSet<String>,
     db: RefCell<BTreeMap<String, Value>>,
     log: RefCell<Vec<String>>,
     now: i64,
@@ -86,6 +89,7 @@ impl<'a> Interp<'a> {
     pub fn new(program: &'a Program) -> Self {
         Interp {
             funcs: program.functions(),
+            variants: program.type_registry().variants(),
             db: RefCell::new(BTreeMap::new()),
             log: RefCell::new(Vec::new()),
             now: 1000,
@@ -224,6 +228,13 @@ impl<'a> Interp<'a> {
             Expr::Ident(name, span) => env
                 .get(name)
                 .cloned()
+                .or_else(|| {
+                    // A bare identifier that names a sum-type variant (and isn't
+                    // shadowed by a local) is that variant's value.
+                    self.variants
+                        .contains(name)
+                        .then(|| Value::Variant(name.clone()))
+                })
                 .ok_or_else(|| Signal::Error(format!("unknown variable `{}`", name), *span)),
             Expr::Unary { op, expr, span } => {
                 let v = self.eval_expr(expr, env)?;
@@ -289,6 +300,19 @@ impl<'a> Interp<'a> {
                 span,
                 ..
             } => self.eval_method(recv, name, args, *span, env),
+            Expr::Match {
+                scrutinee,
+                arms,
+                span,
+            } => {
+                let v = self.eval_expr(scrutinee, env)?;
+                for arm in arms {
+                    if pattern_matches(&arm.pattern, &v) {
+                        return self.eval_expr(&arm.body, env);
+                    }
+                }
+                Err(Signal::Error(format!("no match arm for `{}`", v), *span))
+            }
         }
     }
 
@@ -530,7 +554,17 @@ fn value_eq(a: &Value, b: &Value) -> bool {
                     .all(|(k, v)| y.get(k).map_or(false, |w| value_eq(v, w)))
         }
         (Ok(x), Ok(y)) | (Err(x), Err(y)) => value_eq(x, y),
+        (Variant(x), Variant(y)) => x == y,
         _ => false,
+    }
+}
+
+/// Does a payload-less pattern match a value? `_` matches anything; a named
+/// variant matches a `Variant` with the same name.
+fn pattern_matches(pat: &Pattern, v: &Value) -> bool {
+    match pat {
+        Pattern::Wildcard { .. } => true,
+        Pattern::Variant { name, .. } => matches!(v, Value::Variant(vn) if vn == name),
     }
 }
 
@@ -616,5 +650,27 @@ pub fn render_expr(e: &Expr) -> String {
         }
         Expr::Ok(e, _) => format!("Ok({})", render_expr(e)),
         Expr::Err(e, _) => format!("Err({})", render_expr(e)),
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            let a: Vec<String> = arms
+                .iter()
+                .map(|arm| {
+                    format!(
+                        "{} => {}",
+                        pattern_str(&arm.pattern),
+                        render_expr(&arm.body)
+                    )
+                })
+                .collect();
+            format!("match {} {{ {} }}", render_expr(scrutinee), a.join(", "))
+        }
+    }
+}
+
+fn pattern_str(p: &Pattern) -> String {
+    match p {
+        Pattern::Variant { name, .. } => name.clone(),
+        Pattern::Wildcard { .. } => "_".into(),
     }
 }

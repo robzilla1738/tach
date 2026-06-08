@@ -14,6 +14,8 @@ pub enum Value {
     Record(BTreeMap<String, Value>),
     Ok(Box<Value>),
     Err(Box<Value>),
+    /// A payload-less sum-type variant, carried by name (e.g. `Red`).
+    Variant(String),
 }
 
 impl Value {
@@ -27,6 +29,7 @@ impl Value {
             Value::Record(_) => "record",
             Value::Ok(_) => "Ok",
             Value::Err(_) => "Err",
+            Value::Variant(_) => "variant",
         }
     }
 
@@ -77,6 +80,7 @@ impl fmt::Display for Value {
             }
             Value::Ok(v) => write!(f, "Ok({})", v),
             Value::Err(v) => write!(f, "Err({})", v),
+            Value::Variant(name) => write!(f, "{}", name),
         }
     }
 }

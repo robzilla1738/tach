@@ -43,6 +43,15 @@ pub enum TypeExpr {
         fields: Vec<(String, TypeExpr)>,
         span: Span,
     },
+    /// A sum type — a set of payload-less variants, e.g. `Red | Green | Blue`.
+    Sum { variants: Vec<Variant>, span: Span },
+}
+
+/// One variant of a sum type. Payload-less for now.
+#[derive(Clone, Debug)]
+pub struct Variant {
+    pub name: String,
+    pub span: Span,
 }
 
 impl TypeExpr {
@@ -50,6 +59,7 @@ impl TypeExpr {
         match self {
             TypeExpr::Name { span, .. } => *span,
             TypeExpr::Record { span, .. } => *span,
+            TypeExpr::Sum { span, .. } => *span,
         }
     }
 }
@@ -203,6 +213,36 @@ pub enum Expr {
     },
     Ok(Box<Expr>, Span),
     Err(Box<Expr>, Span),
+    /// `match scrutinee { pattern => body, ... }`.
+    Match {
+        scrutinee: Box<Expr>,
+        arms: Vec<MatchArm>,
+        span: Span,
+    },
+}
+
+/// One arm of a `match`: a pattern and the expression it evaluates to.
+#[derive(Clone, Debug)]
+pub struct MatchArm {
+    pub pattern: Pattern,
+    pub body: Expr,
+    pub span: Span,
+}
+
+/// A `match` pattern. Payload-less: a named variant, or the `_` catch-all.
+#[derive(Clone, Debug)]
+pub enum Pattern {
+    Variant { name: String, span: Span },
+    Wildcard { span: Span },
+}
+
+impl Pattern {
+    pub fn span(&self) -> Span {
+        match self {
+            Pattern::Variant { span, .. } => *span,
+            Pattern::Wildcard { span } => *span,
+        }
+    }
 }
 
 impl Expr {
@@ -221,7 +261,8 @@ impl Expr {
             | Expr::Method { span, .. }
             | Expr::Field { span, .. }
             | Expr::Try { span, .. }
-            | Expr::Record { span, .. } => *span,
+            | Expr::Record { span, .. }
+            | Expr::Match { span, .. } => *span,
         }
     }
 }

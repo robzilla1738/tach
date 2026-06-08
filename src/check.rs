@@ -319,7 +319,11 @@ fn infer_expr(
         Expr::Float(..) => Type::Float,
         Expr::Str(..) => Type::Str,
         Expr::Bool(..) => Type::Bool,
-        Expr::Ident(name, _) => params.get(name).cloned().unwrap_or(Type::Unknown),
+        Expr::Ident(name, _) => params
+            .get(name)
+            .cloned()
+            .or_else(|| reg.enum_of_variant(name).map(|e| Type::Named(e.clone())))
+            .unwrap_or(Type::Unknown),
         Expr::Unary { op, expr, .. } => match op {
             UnOp::Not => Type::Bool,
             UnOp::Neg => infer_expr(expr, params, sigs, reg),
@@ -384,6 +388,11 @@ fn infer_expr(
                 _ => Type::Unknown,
             }
         }
+        // A `match` has the type of its arm bodies; infer from the first arm.
+        Expr::Match { arms, .. } => arms
+            .first()
+            .map(|a| infer_expr(&a.body, params, sigs, reg))
+            .unwrap_or(Type::Unknown),
     }
 }
 
@@ -498,6 +507,14 @@ fn check_expr_fields(
         Expr::Record { fields, .. } => {
             for (_, fe) in fields {
                 check_expr_fields(fe, env, unit, reg, sigs, diags);
+            }
+        }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            check_expr_fields(scrutinee, env, unit, reg, sigs, diags);
+            for arm in arms {
+                check_expr_fields(&arm.body, env, unit, reg, sigs, diags);
             }
         }
         Expr::Int(..) | Expr::Float(..) | Expr::Str(..) | Expr::Bool(..) | Expr::Ident(..) => {}
@@ -696,6 +713,14 @@ fn referenced_idents(b: &Block) -> BTreeSet<String> {
                     we(fe, out);
                 }
             }
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
+                we(scrutinee, out);
+                for arm in arms {
+                    we(&arm.body, out);
+                }
+            }
             Expr::Int(..) | Expr::Float(..) | Expr::Str(..) | Expr::Bool(..) => {}
         }
     }
@@ -821,6 +846,14 @@ fn walk_expr(e: &Expr, sigs: &HashMap<String, FnSig>, u: &mut Usage) {
                 walk_expr(fe, sigs, u);
             }
         }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            walk_expr(scrutinee, sigs, u);
+            for arm in arms {
+                walk_expr(&arm.body, sigs, u);
+            }
+        }
         Expr::Int(..) | Expr::Float(..) | Expr::Str(..) | Expr::Bool(..) | Expr::Ident(..) => {}
     }
 }
@@ -872,6 +905,14 @@ pub fn called_names_in_block(b: &Block) -> BTreeSet<String> {
             Expr::Record { fields, .. } => {
                 for (_, fe) in fields {
                     we(fe, out);
+                }
+            }
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
+                we(scrutinee, out);
+                for arm in arms {
+                    we(&arm.body, out);
                 }
             }
             _ => {}

@@ -202,11 +202,11 @@ call the tools its `allow` block grants. The whole lifecycle is in the log — `
 
 ## The plan language: loops and long-horizon workflows
 
-The linear action layer runs a fixed list of steps. **The plan language is the general form** —
-a `plan { ... }` block in goal source with real control flow: `let` bindings, tool `call`s,
-`approve` gates, `if`/`else`, and **`for`/`while` loops**. It is built for the long horizon: a
-goal can fetch a list from a tool, loop over it, branch on each item, and pause for approval
-*per iteration* — and survive a crash anywhere without ever repeating a side effect.
+The action layer runs a fixed list of steps. The plan language is the general version of that:
+a `plan { ... }` block in goal source with real control flow — `let` bindings, tool `call`s,
+`approve` gates, `if`/`else`, and `for`/`while` loops. A goal can pull a list from a tool, loop
+over it, branch on each item, pause for approval on each one, and survive a crash anywhere
+without repeating a side effect.
 
 ```text
 goal ReconcileChargebacks -> Success {
@@ -228,12 +228,12 @@ goal ReconcileChargebacks -> Success {
 }
 ```
 
-What makes loops safe is **durable re-execution**: run *and* resume both walk the plan from the
-top, and every tool call is **memoized by its receipt** — reaching a call whose receipt already
-exists returns the recorded output without invoking the tool again. So a loop with two genuine
-duplicates pauses twice (once per refund gate); crash right after the first refund and the
-resume *re-walks* the loop, replays the completed work for free, and lands exactly where it left
-off — the first refund is never repeated.
+Loops stay safe because of **durable re-execution**. A run and a resume both walk the plan from
+the top, and every tool call is memoized by its receipt: reach a call whose receipt already
+exists and it hands back the recorded output instead of calling the tool again. So a goal with
+two real duplicates pauses twice, once per refund gate. Crash right after the first refund, and
+the resume re-walks the loop, replays the finished work for free, and picks up where it stopped.
+The first refund never runs twice.
 
 ```console
 $ tach goal run ReconcileChargebacks          # pauses at the FIRST duplicate's refund gate
@@ -248,11 +248,11 @@ $ tach goal replay <id>
   ● replay reproduced the run exactly — 6 step(s), completed
 ```
 
-`RetryFlakyDeploy` shows a `while` loop: it retries a flaky deploy until it succeeds (failing on
-attempts 1–2, succeeding on the 3rd — deterministically), then announces it behind an approval
-gate. Resuming a crashed retry loop re-derives the attempt count and never re-runs a deploy that
-already has a receipt. Both goals are built-in and offline; see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
-for the interpreter and its exactly-once invariant.
+`RetryFlakyDeploy` is a `while` loop: it retries a flaky deploy until it works (it fails on
+attempts 1–2 and succeeds on the 3rd, deterministically), then announces it behind an approval
+gate. Resume a crashed retry loop and it re-derives the attempt count without re-running any
+deploy that already has a receipt. Both goals are built-in and offline; see
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the interpreter and its exactly-once invariant.
 
 ## Why this is different
 
@@ -493,11 +493,11 @@ effect (`tach goal receipts` / `receipt`). Idempotency keys make it survive cras
 *no duplicate side effect*, and `tach goal replay` reproduces the effects from the recorded
 approvals. **The plan language is real:** a `plan { ... }` block (`let`/`call`/`approve`/`if`/
 `for`/`while`) drives built-in goals like `ReconcileChargebacks` (a `for` loop with a per-duplicate
-approval gate) and `RetryFlakyDeploy` (a `while` retry loop) through a **durable re-execution
-interpreter** — run and resume re-walk the plan and memoize completed calls by receipt, so loops
-and crashes still produce each effect exactly once, and `tach goal replay` reproduces the run.
-Durable writes are atomic (temp-file + rename), so a crash mid-write can never strand a half-written
-receipt that a resume would mistake for "not yet done." There's a pluggable coder seam
+approval gate) and `RetryFlakyDeploy` (a `while` retry loop). Its **durable re-execution interpreter**
+re-walks the plan on every run and resume and memoizes completed calls by receipt, so loops and
+crashes still produce each effect exactly once, and `tach goal replay` reproduces the run. Durable
+writes are atomic (temp file, then rename), so a crash mid-write can't strand a half-written receipt
+that a resume would read as "not yet done." There's a pluggable coder seam
 (`tach fix --coder fixture`) whose proposals still go through the exact same pipeline; `tach fmt`
 gives one canonical, idempotent style; `tach schema` publishes versioned JSON schemas for every
 machine output (including `approval` and `receipt`); and `tach doctor` / `tach explain` round out

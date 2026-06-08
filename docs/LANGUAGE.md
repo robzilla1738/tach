@@ -186,10 +186,10 @@ model.
 
 ### Plan goals (workflows)
 
-A goal may carry a `plan { ... }` block instead of relying on the repair loop. A plan is a
-small **workflow language** — a goal that *acts*: it calls (offline, deterministic) tools,
-pauses at human approval gates, and branches and loops over tool output. It is the general
-form of the action layer.
+A goal may carry a `plan { ... }` block instead of leaning on the repair loop. A plan is a small
+**workflow language** — a goal that *acts*. It calls offline, deterministic tools, pauses at
+human approval gates, and branches and loops over what those tools return. It is the general form
+of the action layer.
 
 ```tach
 goal ReconcileChargebacks -> Success {
@@ -235,14 +235,14 @@ Expressions reuse the ordinary grammar — literals, identifiers, field access (
 arithmetic, comparisons, and `&&`/`||`/`!` — evaluated in JSON-value space (the type tools speak).
 `call`/`approve`/`for`/`while`/`in` are contextual keywords, so don't name a variable after them.
 
-Every tool `call` produces a durable **receipt**, and the plan is driven by **re-execution**: a
-run and a resume both walk the plan from the top, and a call whose receipt already exists returns
-its recorded output *without invoking the tool again*. That single rule is what makes loops and
-long-horizon flows crash-safe — a refund inside a loop, crashed right after it commits, is
-replayed for free on resume and never issued twice. `tach goal approvals`/`approve`/`deny` drive
-the gates; `tach goal receipts` lists the effects; `tach goal replay` proves the run reproduces.
-Two plan goals ship built-in: `ReconcileChargebacks` (a `for` loop with a per-duplicate refund
-gate) and `RetryFlakyDeploy` (a `while` retry loop). See the architecture notes for the durable
+Every tool `call` produces a durable **receipt**, and the plan runs by **re-execution**: a run
+and a resume both walk the plan from the top, and a call whose receipt already exists returns its
+recorded output without invoking the tool again. That one rule is what makes loops crash-safe. A
+refund inside a loop, crashed the instant after it commits, is replayed for free on the next
+resume and never issued twice. Drive the gates with `tach goal approvals`/`approve`/`deny`, list
+the effects with `tach goal receipts`, and prove a run reproduces with `tach goal replay`. Two
+plan goals ship built-in: `ReconcileChargebacks` (a `for` loop with a per-duplicate refund gate)
+and `RetryFlakyDeploy` (a `while` retry loop). See the architecture notes for the durable
 interpreter and its exactly-once invariant.
 
 ## Formatting

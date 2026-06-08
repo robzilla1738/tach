@@ -178,6 +178,7 @@ The result is a single static binary. Put `target/release/tach` on your `PATH`.
 | `tach run [file]` | Run the project's `main` |
 | `tach test [filter]` | Run tests (blocked while the project has errors) |
 | `tach fix` | Run the agentic repair loop to green (`--strategy`, `--dry-run`, `--coder fixture`) |
+| `tach fmt [file]` | Format to the one canonical style (`--check` for CI) |
 | `tach race` | Race repair strategies in isolation; `--apply` the winner |
 | `tach trace` | Show the last fix/race run (`--json`) |
 | `tach replay` | Re-run the last loop and prove it reproduces |

@@ -13,6 +13,7 @@ pub mod builtins;
 pub mod check;
 pub mod cli;
 pub mod diagnostics;
+pub mod fmt;
 pub mod interp;
 pub mod lexer;
 pub mod parser;

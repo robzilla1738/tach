@@ -11,7 +11,7 @@ use crate::patch::Workspace;
 use crate::program::Program;
 use crate::runner::run_tests;
 use crate::trace::{self, TraceFile};
-use crate::{builtins, project, render, term};
+use crate::{builtins, fmt, project, render, term};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -26,6 +26,7 @@ pub fn run(args: Vec<String>) -> i32 {
         "run" => cmd_run(&rest),
         "test" => cmd_test(&rest),
         "fix" => cmd_fix(&rest),
+        "fmt" => cmd_fmt(&rest),
         "race" => cmd_race(&rest),
         "trace" => cmd_trace(&rest),
         "replay" => cmd_replay(&rest),
@@ -368,6 +369,105 @@ fn cmd_fix(rest: &[String]) -> i32 {
     }
 }
 
+/// `tach fmt [file] [--check]` — render every `.tach` file to its one canonical
+/// form. With `--check` it writes nothing and exits non-zero if anything would
+/// change (the CI gate). Files that don't parse are left untouched.
+fn cmd_fmt(rest: &[String]) -> i32 {
+    let p = parse(rest, &[]);
+    let check = p.has("--check");
+
+    let files: Vec<(String, PathBuf, String)> =
+        if let Some(arg) = p.pos.iter().find(|s| s.ends_with(".tach")) {
+            let path = PathBuf::from(arg);
+            match std::fs::read_to_string(&path) {
+                Ok(t) => vec![(arg.clone(), path, t)],
+                Err(e) => {
+                    eprintln!("{} {}: {}", term::bold_red("error:"), arg, e);
+                    return 1;
+                }
+            }
+        } else {
+            let root = cwd();
+            match project::load_workspace(&root) {
+                Ok(ws) => ws
+                    .files
+                    .into_iter()
+                    .map(|(rel, t)| (rel.clone(), root.join(&rel), t))
+                    .collect(),
+                Err(e) => {
+                    eprintln!("{} {}", term::bold_red("error:"), e);
+                    return 1;
+                }
+            }
+        };
+
+    if files.is_empty() {
+        println!("  {} no .tach files found here", term::dim("·"));
+        return 0;
+    }
+
+    let mut changed: Vec<String> = Vec::new();
+    let mut skipped: Vec<(String, &'static str)> = Vec::new();
+    for (disp, abs, text) in &files {
+        match fmt::format_file(disp, text) {
+            Err(fmt::Skip::ParseError) => {
+                skipped.push((disp.clone(), "does not parse — run `tach check`"))
+            }
+            Err(fmt::Skip::HasComments) => {
+                skipped.push((disp.clone(), "has comments (not yet preserved)"))
+            }
+            Ok(formatted) if &formatted != text => {
+                changed.push(disp.clone());
+                if !check {
+                    if let Err(e) = std::fs::write(abs, &formatted) {
+                        eprintln!("{} {}: {}", term::bold_red("write error:"), disp, e);
+                        return 1;
+                    }
+                }
+            }
+            Ok(_) => {}
+        }
+    }
+
+    for (s, why) in &skipped {
+        println!("  {} skipped {} ({})", term::dim("·"), s, why);
+    }
+
+    if check {
+        if changed.is_empty() {
+            println!(
+                "  {} all {} file(s) are formatted",
+                term::bold_green("●"),
+                files.len()
+            );
+            0
+        } else {
+            for f in &changed {
+                println!("  {} {}", term::bold_yellow("✗"), f);
+            }
+            println!(
+                "  {} {} file(s) need formatting — run `tach fmt`",
+                term::bold_red("●"),
+                changed.len()
+            );
+            1
+        }
+    } else {
+        if changed.is_empty() {
+            println!(
+                "  {} already formatted ({} file(s))",
+                term::bold_green("●"),
+                files.len()
+            );
+        } else {
+            for f in &changed {
+                println!("  {} formatted {}", term::green("✓"), f);
+            }
+        }
+        0
+    }
+}
+
 fn cmd_race(rest: &[String]) -> i32 {
     let p = parse(rest, &["--max-laps"]);
     let max = p
@@ -698,6 +798,7 @@ fn print_help() {
         "fix",
         "run the agentic repair loop to green (--strategy, --dry-run, --coder fixture)",
     );
+    cmd("fmt [file]", "format to the one canonical style (--check)");
     cmd(
         "race",
         "race repair strategies in isolation; --apply the winner",

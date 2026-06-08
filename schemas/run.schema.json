@@ -11,9 +11,9 @@
     "goal": { "type": "string" },
     "status": {
       "type": "string",
-      "enum": ["running", "completed", "failed", "cancelled", "budget_exhausted"]
+      "enum": ["running", "completed", "failed", "cancelled", "budget_exhausted", "awaiting_approval", "denied"]
     },
-    "step": { "type": "integer", "minimum": 0, "description": "Steps completed (== highest checkpoint)." },
+    "step": { "type": "integer", "minimum": 0, "description": "Durable transitions recorded (repair: == highest checkpoint)." },
     "consecutive_rejections": { "type": "integer", "minimum": 0 },
     "patches_applied": { "type": "integer", "minimum": 0 },
     "patches_rejected": { "type": "integer", "minimum": 0 },
@@ -22,6 +22,12 @@
     "diff_chars": { "type": "integer", "minimum": 0 },
     "final_errors": { "type": "integer", "minimum": 0 },
     "tests_passed": { "type": "integer", "minimum": 0 },
-    "tests_failed": { "type": "integer", "minimum": 0 }
+    "tests_failed": { "type": "integer", "minimum": 0 },
+
+    "kind": { "type": "string", "description": "\"\"/\"repair\" for the code-repair runtime; \"action\" for a business goal." },
+    "cursor": { "type": "integer", "minimum": 0, "description": "Action-run plan index; the budget is billed against this." },
+    "pending_approval": { "type": ["string", "null"], "description": "Approval id this run is blocked on when awaiting_approval." },
+    "actions_executed": { "type": "integer", "minimum": 0 },
+    "receipts_created": { "type": "integer", "minimum": 0 }
   }
 }

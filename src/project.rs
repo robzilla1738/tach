@@ -26,7 +26,7 @@ fn collect(base: &Path, dir: &Path, ws: &mut Workspace) -> io::Result<()> {
                 continue;
             }
             collect(base, &p, ws)?;
-        } else if p.extension().map_or(false, |x| x == "tach") {
+        } else if p.extension().is_some_and(|x| x == "tach") {
             let rel = p
                 .strip_prefix(base)
                 .unwrap_or(&p)

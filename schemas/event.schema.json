@@ -18,7 +18,10 @@
         "run.started", "run.resumed", "workspace.loaded", "diagnostic.emitted",
         "patch.proposed", "patch.verified", "patch.applied", "patch.rejected",
         "test.completed", "effect.delta_detected", "checkpoint.written",
-        "budget.exhausted", "run.completed", "run.failed", "run.cancelled"
+        "budget.exhausted", "run.completed", "run.failed", "run.cancelled",
+        "action.proposed", "approval.requested", "approval.granted", "approval.denied",
+        "tool.called", "tool.completed", "tool.failed",
+        "receipt.created", "receipt.reused", "action.skipped"
       ]
     },
     "timestamp_mode": { "type": "string", "enum": ["deterministic", "wallclock"] },

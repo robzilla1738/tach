@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tach.dev/schemas/approval.schema.json",
+  "title": "Tach Approval",
+  "description": "A human approval gate on an effectful action in an action run (approvals/<id>.json). The driver writes it pending when it proposes the action; `tach goal approve`/`deny` flips it to a terminal status. The approval file is the durable truth for whether a gate is resolved.",
+  "type": "object",
+  "required": ["id", "action_id", "tool", "summary", "status"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string", "description": "Deterministic approval id, e.g. apr_efa727c214fb." },
+    "action_id": { "type": "string", "description": "The plan action this gate guards." },
+    "tool": { "type": "string", "description": "The tool the action would call." },
+    "summary": { "type": "string", "description": "Human-readable intent of the action." },
+    "status": { "type": "string", "enum": ["pending", "granted", "denied"] },
+    "note": { "type": ["string", "null"], "description": "Optional operator note/reason for the decision." }
+  }
+}

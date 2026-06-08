@@ -12,11 +12,12 @@
 //! with only the diagnostics that remain. A run can crash after any step and
 //! resume to exactly where it left off.
 
+use crate::action::{self, ActionPlan};
 use crate::agent::{self, Strategy};
 use crate::event::{kind, EventLog};
 use crate::goal::GoalSpec;
 use crate::patch::{verify_patch, VerifyOpts, Workspace};
-use crate::store::{self, events_path, Checkpoint, GoalRecord, RunState};
+use crate::store::{self, events_path, Approval, Checkpoint, GoalRecord, Receipt, RunState};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::io;
@@ -30,6 +31,20 @@ pub struct RunResult {
     /// than reaching a terminal status. The durable state is fully persisted; the
     /// run is resumable.
     pub crashed: bool,
+    /// True when an action run stopped at an approval gate. Not a crash and not a
+    /// terminal status — the run is healthy and waiting for `tach goal approve`.
+    pub paused: bool,
+}
+
+/// Where to inject a simulated crash in an action run. `Step(n)` crashes right after
+/// the durable transition that brings `state.step` to `n` (this is what the CLI's
+/// `--crash-after step:N` maps to). `AfterReceipt(n)` is a test-only hook that crashes
+/// in the *intra-action danger window* — after the `n`th receipt is written but before
+/// the cursor advances — to prove resume reuses the receipt instead of re-invoking.
+#[derive(Clone, Copy, Debug)]
+pub enum ActionCrash {
+    Step(u64),
+    AfterReceipt(u64),
 }
 
 /// Map a stored strategy label back to its `Strategy`.
@@ -140,6 +155,7 @@ pub fn start_run(
         spec: spec.clone(),
         strategy: strategy.label().to_string(),
         base_files: base.files.clone(),
+        kind: "repair".into(),
     };
     store::save_goal(repo, &run_id, &record)?;
 
@@ -171,6 +187,11 @@ pub fn start_run(
         final_errors: 0,
         tests_passed: 0,
         tests_failed: 0,
+        kind: "repair".into(),
+        cursor: 0,
+        pending_approval: None,
+        actions_executed: 0,
+        receipts_created: 0,
     };
     store::save_state(repo, &state)?;
 
@@ -181,6 +202,10 @@ pub fn start_run(
 /// checkpoint, continuing the same event log.
 pub fn resume_run(repo: &Path, run_id: &str, crash_after: Option<u64>) -> io::Result<RunResult> {
     let record = store::load_goal(repo, run_id)?;
+    if record.kind == "action" {
+        // The CLI only exposes step-boundary crashes; the receipt-window hook is test-only.
+        return resume_action_run(repo, run_id, crash_after.map(ActionCrash::Step));
+    }
     let spec = record.spec;
     let strategy = strategy_from_label(&record.strategy);
     let mut state = store::load_state(repo, run_id)?;
@@ -239,6 +264,7 @@ fn drive(
                 state,
                 final_files: ws.files,
                 crashed: false,
+                paused: false,
             });
         }
 
@@ -257,6 +283,7 @@ fn drive(
                     state,
                     final_files: ws.files,
                     crashed: false,
+                    paused: false,
                 });
             }
             StepOutcome::NoAction {
@@ -277,6 +304,7 @@ fn drive(
                     state,
                     final_files: ws.files,
                     crashed: false,
+                    paused: false,
                 });
             }
             StepOutcome::Patch(p) => {
@@ -362,6 +390,7 @@ fn drive(
                         state,
                         final_files: ws.files,
                         crashed: true,
+                        paused: false,
                     });
                 }
 
@@ -381,6 +410,7 @@ fn drive(
                         state,
                         final_files: ws.files,
                         crashed: false,
+                        paused: false,
                     });
                 }
             }
@@ -413,6 +443,9 @@ pub struct ReplayResult {
 /// and prove it reproduces the recorded final state byte-for-byte.
 pub fn replay_run(repo: &Path, run_id: &str) -> io::Result<ReplayResult> {
     let record = store::load_goal(repo, run_id)?;
+    if record.kind == "action" {
+        return replay_action_run(repo, run_id);
+    }
     let recorded = store::load_state(repo, run_id)?;
     let recorded_files = store::load_latest_checkpoint(repo, run_id)
         .map(|cp| cp.files)
@@ -467,6 +500,441 @@ fn simulate(
             }
         }
     }
+}
+
+// ============================================================================
+// Action Layer runtime
+// ============================================================================
+//
+// A business goal runs a fixed `ActionPlan` instead of repairing source. Its own
+// driver (`drive_actions`) reuses the same durable substrate — run ids, the append-
+// only event log, `state.json` — but its unit of work is "invoke a tool and write a
+// receipt", not "verify a typed patch", so it does not share `drive`/`step_once`.
+//
+// The single correctness invariant: **advancing the cursor and saving state is the
+// sole commit that moves past an action / clears an approval gate.** The approval
+// file's status and the receipts dir are the durable truth; `RunState.status` is
+// cosmetic. Every crash window then resolves safely (see `drive_actions`).
+
+/// A `RunResult` for an action run, which has no workspace to write back.
+fn action_result(state: RunState, crashed: bool, paused: bool) -> RunResult {
+    RunResult {
+        state,
+        final_files: BTreeMap::new(),
+        crashed,
+        paused,
+    }
+}
+
+/// Start a brand-new action run from a built-in goal's spec + plan.
+pub fn start_action_run(
+    repo: &Path,
+    spec: GoalSpec,
+    plan: ActionPlan,
+    crash: Option<ActionCrash>,
+) -> io::Result<RunResult> {
+    let base: BTreeMap<String, String> = BTreeMap::new();
+    let fingerprint = store::fingerprint(&spec.name, &base);
+    let run_id = store::allocate_run(repo, &fingerprint)?;
+    let record = GoalRecord {
+        spec: spec.clone(),
+        strategy: "action".into(),
+        base_files: base,
+        kind: "action".into(),
+    };
+    store::save_goal(repo, &run_id, &record)?;
+
+    let mut log = EventLog::create(&events_path(repo, &run_id), &run_id)?;
+    log.append(
+        kind::RUN_STARTED,
+        json!({
+            "goal": spec.name,
+            "kind": "action",
+            "budget": { "steps": spec.step_budget() },
+            "tools": spec.allow.tools,
+            "actions": plan.steps.len(),
+        }),
+    )?;
+
+    let state = RunState {
+        run_id: run_id.clone(),
+        goal: spec.name.clone(),
+        status: "running".into(),
+        step: 0,
+        consecutive_rejections: 0,
+        patches_applied: 0,
+        patches_rejected: 0,
+        tests_run: 0,
+        regressions: 0,
+        diff_chars: 0,
+        final_errors: 0,
+        tests_passed: 0,
+        tests_failed: 0,
+        kind: "action".into(),
+        cursor: 0,
+        pending_approval: None,
+        actions_executed: 0,
+        receipts_created: 0,
+    };
+    store::save_state(repo, &state)?;
+
+    drive_actions(repo, &spec, &plan, state, &mut log, crash)
+}
+
+/// Resume an action run from `state.json` (its cursor) — there are no checkpoints to
+/// load; the cursor + approvals + receipts dirs are the durable state. The plan is
+/// re-derived from the catalog by goal name.
+pub fn resume_action_run(
+    repo: &Path,
+    run_id: &str,
+    crash: Option<ActionCrash>,
+) -> io::Result<RunResult> {
+    let record = store::load_goal(repo, run_id)?;
+    let spec = record.spec;
+    let (_, plan) = action::builtin_action_goal(&spec.name).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("no built-in action goal `{}` to resume", spec.name),
+        )
+    })?;
+    let state = store::load_state(repo, run_id)?;
+    let mut log = EventLog::resume(&events_path(repo, run_id), run_id)?;
+    log.append(
+        kind::RUN_RESUMED,
+        json!({ "from_step": state.step, "cursor": state.cursor }),
+    )?;
+    // Leave `status` as recorded (`awaiting_approval` or `running`); the driver
+    // resolves the gate from the approval file, never from a second status flag.
+    drive_actions(repo, &spec, &plan, state, &mut log, crash)
+}
+
+/// The durable action loop. See the module comment for the crash-safety invariant.
+fn drive_actions(
+    repo: &Path,
+    spec: &GoalSpec,
+    plan: &ActionPlan,
+    mut state: RunState,
+    log: &mut EventLog,
+    crash: Option<ActionCrash>,
+) -> io::Result<RunResult> {
+    let run_id = state.run_id.clone();
+    let step_budget = spec.step_budget();
+    let tools = spec.allowed_tools();
+
+    loop {
+        // Budget gate bills the CURSOR (plan progress), not raw iterations — so an
+        // approval pause or an idempotent re-entry never burns budget, and a granted
+        // gate (cursor already below budget) is never voided on resume.
+        if state.cursor >= step_budget {
+            state.status = "budget_exhausted".into();
+            log.append(
+                kind::BUDGET_EXHAUSTED,
+                json!({ "actions": state.cursor, "limit": step_budget }),
+            )?;
+            store::save_state(repo, &state)?;
+            return Ok(action_result(state, false, false));
+        }
+
+        let idx = state.cursor as usize;
+        if idx >= plan.steps.len() {
+            state.status = "completed".into();
+            log.append(
+                kind::RUN_COMPLETED,
+                json!({
+                    "steps": state.step,
+                    "actions_executed": state.actions_executed,
+                    "receipts": state.receipts_created,
+                }),
+            )?;
+            store::save_state(repo, &state)?;
+            return Ok(action_result(state, false, false));
+        }
+
+        let action = &plan.steps[idx];
+
+        // Authority FIRST, every iteration, for read and effectful actions alike: a
+        // plan can only ever call what the goal's `allow` block grants. No ambient
+        // authority — the check runs even on the post-approval execute path.
+        if !tools.contains(&action.tool) {
+            state.status = "failed".into();
+            log.append(
+                kind::RUN_FAILED,
+                json!({
+                    "reason": format!("tool `{}` is outside the goal's authority", action.tool),
+                    "action": action.id,
+                }),
+            )?;
+            store::save_state(repo, &state)?;
+            return Ok(action_result(state, false, false));
+        }
+
+        // Approval gate — the approval file's status is the durable truth.
+        if action.requires_approval {
+            let apr_id = store::approval_id(&run_id, &action.id);
+            let status = store::load_approval(repo, &run_id, &apr_id)
+                .ok()
+                .map(|a| a.status);
+            match status.as_deref() {
+                None => {
+                    // First reach: propose + request approval, then PAUSE. The cursor
+                    // is NOT advanced — re-entry on resume sees the pending file.
+                    let approval = Approval {
+                        id: apr_id.clone(),
+                        action_id: action.id.clone(),
+                        tool: action.tool.clone(),
+                        summary: action.summary.clone(),
+                        status: "pending".into(),
+                        note: None,
+                    };
+                    store::save_approval(repo, &run_id, &approval)?;
+                    log.append(
+                        kind::ACTION_PROPOSED,
+                        json!({
+                            "action": action.id,
+                            "tool": action.tool,
+                            "summary": action.summary,
+                            "input": action.input,
+                        }),
+                    )?;
+                    log.append(
+                        kind::APPROVAL_REQUESTED,
+                        json!({ "approval_id": apr_id, "action": action.id, "tool": action.tool }),
+                    )?;
+                    state.pending_approval = Some(apr_id);
+                    state.status = "awaiting_approval".into();
+                    state.step += 1;
+                    store::save_state(repo, &state)?;
+                    if matches!(crash, Some(ActionCrash::Step(n)) if n == state.step) {
+                        return Ok(action_result(state, true, false));
+                    }
+                    return Ok(action_result(state, false, true));
+                }
+                Some("pending") => {
+                    state.status = "awaiting_approval".into();
+                    store::save_state(repo, &state)?;
+                    return Ok(action_result(state, false, true));
+                }
+                Some("denied") => {
+                    log.append(
+                        kind::ACTION_SKIPPED,
+                        json!({ "action": action.id, "reason": "approval denied" }),
+                    )?;
+                    state.status = "denied".into();
+                    log.append(
+                        kind::RUN_FAILED,
+                        json!({ "reason": "approval denied", "action": action.id }),
+                    )?;
+                    store::save_state(repo, &state)?;
+                    return Ok(action_result(state, false, false));
+                }
+                // "granted" (or any other resolved state) → fall through and execute.
+                _ => {}
+            }
+        }
+
+        // Execute. For effectful actions, the receipt is the commit point and the
+        // idempotency scan makes re-entry safe.
+        if action.effectful {
+            let key = store::idempotency_key(&run_id, &action.id, &action.tool, &action.input);
+            if let Some(existing) = store::find_receipt_by_key(repo, &run_id, &key) {
+                // Already done in a prior (crashed) pass — never invoke twice.
+                log.append(
+                    kind::RECEIPT_REUSED,
+                    json!({
+                        "receipt_id": existing.receipt_id,
+                        "idempotency_key": key,
+                        "action": action.id,
+                    }),
+                )?;
+                log.append(
+                    kind::ACTION_SKIPPED,
+                    json!({ "action": action.id, "reason": "receipt already exists" }),
+                )?;
+            } else {
+                log.append(
+                    kind::TOOL_CALLED,
+                    json!({
+                        "tool": action.tool,
+                        "action": action.id,
+                        "idempotency_key": key,
+                        "input": action.input,
+                    }),
+                )?;
+                match action::invoke_fake_tool(&action.tool, &action.input) {
+                    Ok(output) => {
+                        log.append(
+                            kind::TOOL_COMPLETED,
+                            json!({ "tool": action.tool, "action": action.id, "output": output }),
+                        )?;
+                        let rid = store::receipt_id(&key);
+                        let receipt = Receipt {
+                            receipt_id: rid.clone(),
+                            idempotency_key: key.clone(),
+                            action_id: action.id.clone(),
+                            tool: action.tool.clone(),
+                            input: action.input.clone(),
+                            output,
+                        };
+                        store::save_receipt(repo, &run_id, &receipt)?; // <- COMMIT POINT
+                        state.receipts_created += 1;
+                        log.append(
+                            kind::RECEIPT_CREATED,
+                            json!({
+                                "receipt_id": rid,
+                                "tool": action.tool,
+                                "action": action.id,
+                                "idempotency_key": key,
+                            }),
+                        )?;
+                        // Intra-action danger window (test-only): crash after the
+                        // receipt is durable but before the cursor advances. Resume
+                        // must reuse this receipt rather than refund twice.
+                        if matches!(crash, Some(ActionCrash::AfterReceipt(n)) if n as usize == state.receipts_created)
+                        {
+                            store::save_state(repo, &state)?;
+                            return Ok(action_result(state, true, false));
+                        }
+                    }
+                    Err(e) => {
+                        log.append(
+                            kind::TOOL_FAILED,
+                            json!({ "tool": action.tool, "action": action.id, "error": e }),
+                        )?;
+                        state.status = "failed".into();
+                        log.append(
+                            kind::RUN_FAILED,
+                            json!({ "reason": "tool failed", "action": action.id }),
+                        )?;
+                        store::save_state(repo, &state)?;
+                        return Ok(action_result(state, false, false));
+                    }
+                }
+            }
+            state.actions_executed += 1;
+        } else {
+            // Read-only action: invoke, record, no receipt.
+            log.append(
+                kind::TOOL_CALLED,
+                json!({ "tool": action.tool, "action": action.id, "input": action.input }),
+            )?;
+            match action::invoke_fake_tool(&action.tool, &action.input) {
+                Ok(output) => {
+                    log.append(
+                        kind::TOOL_COMPLETED,
+                        json!({ "tool": action.tool, "action": action.id, "output": output }),
+                    )?;
+                }
+                Err(e) => {
+                    log.append(
+                        kind::TOOL_FAILED,
+                        json!({ "tool": action.tool, "action": action.id, "error": e }),
+                    )?;
+                    state.status = "failed".into();
+                    log.append(
+                        kind::RUN_FAILED,
+                        json!({ "reason": "tool failed", "action": action.id }),
+                    )?;
+                    store::save_state(repo, &state)?;
+                    return Ok(action_result(state, false, false));
+                }
+            }
+            state.actions_executed += 1;
+        }
+
+        // ADVANCE — the sole atomic commit past this action and any approval gate.
+        state.cursor += 1;
+        state.pending_approval = None;
+        state.status = "running".into();
+        state.step += 1;
+        store::save_state(repo, &state)?;
+        if matches!(crash, Some(ActionCrash::Step(n)) if n == state.step) {
+            return Ok(action_result(state, true, false));
+        }
+    }
+}
+
+/// Replay an action run as a pure simulation. Reads the recorded human approvals from
+/// the store (they are the run's non-deterministic *inputs*), re-invokes the
+/// deterministic fake tools, and writes nothing. Determinism is proven by comparing
+/// the simulated terminal status and the simulated receipt set (idempotency key →
+/// output) against the recorded ones — **not** the event sequence, which legitimately
+/// differs between a straight run and a crashed-then-resumed one.
+pub fn replay_action_run(repo: &Path, run_id: &str) -> io::Result<ReplayResult> {
+    let record = store::load_goal(repo, run_id)?;
+    let spec = record.spec;
+    let (_, plan) = action::builtin_action_goal(&spec.name).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("no built-in action goal `{}` to replay", spec.name),
+        )
+    })?;
+    let recorded = store::load_state(repo, run_id)?;
+    let recorded_receipts: BTreeMap<String, serde_json::Value> = store::list_receipts(repo, run_id)
+        .into_iter()
+        .map(|r| (r.idempotency_key, r.output))
+        .collect();
+
+    let step_budget = spec.step_budget();
+    let tools = spec.allowed_tools();
+    let mut cursor = 0usize;
+    let mut sim_receipts: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+    let mut status = "completed".to_string();
+
+    while cursor < plan.steps.len() {
+        if cursor as u64 >= step_budget {
+            status = "budget_exhausted".into();
+            break;
+        }
+        let action = &plan.steps[cursor];
+        if !tools.contains(&action.tool) {
+            status = "failed".into();
+            break;
+        }
+        if action.requires_approval {
+            let apr_id = store::approval_id(run_id, &action.id);
+            match store::load_approval(repo, run_id, &apr_id)
+                .ok()
+                .map(|a| a.status)
+                .as_deref()
+            {
+                Some("granted") => {}
+                Some("denied") => {
+                    status = "denied".into();
+                    break;
+                }
+                _ => {
+                    status = "awaiting_approval".into();
+                    break;
+                }
+            }
+        }
+        if action.effectful {
+            let key = store::idempotency_key(run_id, &action.id, &action.tool, &action.input);
+            if let std::collections::btree_map::Entry::Vacant(slot) = sim_receipts.entry(key) {
+                match action::invoke_fake_tool(&action.tool, &action.input) {
+                    Ok(out) => {
+                        slot.insert(out);
+                    }
+                    Err(_) => {
+                        status = "failed".into();
+                        break;
+                    }
+                }
+            }
+        } else if action::invoke_fake_tool(&action.tool, &action.input).is_err() {
+            status = "failed".into();
+            break;
+        }
+        cursor += 1;
+    }
+
+    let identical = status == recorded.status && sim_receipts == recorded_receipts;
+    Ok(ReplayResult {
+        recorded_status: recorded.status,
+        replayed_status: status,
+        identical,
+        steps: cursor as u64,
+    })
 }
 
 #[cfg(test)]
@@ -717,5 +1185,480 @@ mod tests {
             .rejections
             .iter()
             .any(|r| r.contains("outside the goal's authority")));
+    }
+
+    // ====================================================================
+    // Action layer
+    // ====================================================================
+
+    use crate::action::{self, ActionPlan, PlannedAction};
+    use crate::goal::{AllowSpec, BudgetSpec};
+
+    fn resolve_dup() -> (GoalSpec, ActionPlan) {
+        action::builtin_action_goal("ResolveDuplicateCharge").expect("catalog entry")
+    }
+
+    /// Mirror what `tach goal approve` does: flip the approval file to a terminal
+    /// status and append the decision event (the human decision is recorded once,
+    /// here, never re-emitted by the driver).
+    fn decide(repo: &Path, run_id: &str, action_id: &str, status: &str, kind_const: &str) {
+        let apr_id = store::approval_id(run_id, action_id);
+        let mut a = store::load_approval(repo, run_id, &apr_id).expect("approval exists");
+        a.status = status.into();
+        store::save_approval(repo, run_id, &a).unwrap();
+        let mut log = EventLog::resume(&store::events_path(repo, run_id), run_id).unwrap();
+        log.append(
+            kind_const,
+            json!({ "approval_id": apr_id, "action": action_id }),
+        )
+        .unwrap();
+    }
+    fn approve(repo: &Path, run_id: &str, action_id: &str) {
+        decide(repo, run_id, action_id, "granted", kind::APPROVAL_GRANTED);
+    }
+    fn deny(repo: &Path, run_id: &str, action_id: &str) {
+        decide(repo, run_id, action_id, "denied", kind::APPROVAL_DENIED);
+    }
+
+    fn count_kind(repo: &Path, run_id: &str, k: &str) -> usize {
+        read_all(&store::events_path(repo, run_id))
+            .unwrap()
+            .iter()
+            .filter(|e| e.kind == k)
+            .count()
+    }
+    fn refund_tool_calls(repo: &Path, run_id: &str) -> usize {
+        read_all(&store::events_path(repo, run_id))
+            .unwrap()
+            .iter()
+            .filter(|e| {
+                e.kind == kind::TOOL_CALLED
+                    && e.payload.get("tool").and_then(|v| v.as_str()) == Some("fake.stripe.refund")
+            })
+            .count()
+    }
+
+    #[test]
+    fn action_run_pauses_at_approval_gate() {
+        let repo = TempRepo::new("act_pause");
+        let (spec, plan) = resolve_dup();
+        let r = start_action_run(repo.path(), spec, plan, None).unwrap();
+        assert!(r.paused);
+        assert_eq!(r.state.status, "awaiting_approval");
+        assert_eq!(r.state.cursor, 1, "lookup done, paused at the refund gate");
+        assert_eq!(r.state.receipts_created, 0);
+        let aprs = store::list_approvals(repo.path(), &r.state.run_id);
+        assert_eq!(aprs.len(), 1);
+        assert_eq!(aprs[0].status, "pending");
+        assert_eq!(
+            count_kind(repo.path(), &r.state.run_id, kind::APPROVAL_REQUESTED),
+            1
+        );
+        assert!(store::list_receipts(repo.path(), &r.state.run_id).is_empty());
+    }
+
+    #[test]
+    fn approve_then_resume_executes_exactly_one_refund() {
+        let repo = TempRepo::new("act_approve");
+        let (spec, plan) = resolve_dup();
+        let r = start_action_run(repo.path(), spec, plan, None).unwrap();
+        let id = r.state.run_id.clone();
+        approve(repo.path(), &id, "refund");
+        let done = resume_action_run(repo.path(), &id, None).unwrap();
+        assert_eq!(done.state.status, "completed");
+        assert_eq!(done.state.actions_executed, 4);
+        let receipts = store::list_receipts(repo.path(), &id);
+        assert_eq!(receipts.len(), 3, "refund + email + zendesk");
+        assert_eq!(
+            receipts
+                .iter()
+                .filter(|r| r.tool == "fake.stripe.refund")
+                .count(),
+            1
+        );
+        assert_eq!(refund_tool_calls(repo.path(), &id), 1);
+    }
+
+    #[test]
+    fn crash_after_receipt_does_not_double_refund() {
+        // The killer property. Crash in the intra-action danger window — after the
+        // refund receipt is durable but before the cursor advances — then resume.
+        // The refund must NOT be invoked a second time.
+        let repo = TempRepo::new("act_killer");
+        let (spec, plan) = resolve_dup();
+        let r = start_action_run(repo.path(), spec, plan, None).unwrap();
+        let id = r.state.run_id.clone();
+        approve(repo.path(), &id, "refund");
+
+        let crashed =
+            resume_action_run(repo.path(), &id, Some(ActionCrash::AfterReceipt(1))).unwrap();
+        assert!(crashed.crashed);
+        assert_eq!(
+            store::list_receipts(repo.path(), &id).len(),
+            1,
+            "the refund receipt is already durable at the crash"
+        );
+
+        let done = resume_action_run(repo.path(), &id, None).unwrap();
+        assert_eq!(done.state.status, "completed");
+        assert_eq!(
+            refund_tool_calls(repo.path(), &id),
+            1,
+            "fake.stripe.refund is called exactly once across the whole run"
+        );
+        assert!(
+            count_kind(repo.path(), &id, kind::RECEIPT_REUSED) >= 1,
+            "the re-entered refund reused its receipt instead of re-calling"
+        );
+        let receipts = store::list_receipts(repo.path(), &id);
+        assert_eq!(
+            receipts
+                .iter()
+                .filter(|r| r.tool == "fake.stripe.refund")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn crash_at_step_boundary_resumes_clean() {
+        // The killer-demo line: resume --crash-after step:4 crashes right after the
+        // notify (step 4), with the refund (step 3) already durably done.
+        let repo = TempRepo::new("act_step4");
+        let (spec, plan) = resolve_dup();
+        let r = start_action_run(repo.path(), spec, plan, None).unwrap();
+        let id = r.state.run_id.clone();
+        approve(repo.path(), &id, "refund");
+
+        let crashed = resume_action_run(repo.path(), &id, Some(ActionCrash::Step(4))).unwrap();
+        assert!(crashed.crashed);
+        assert_eq!(crashed.state.step, 4);
+        assert_eq!(
+            store::list_receipts(repo.path(), &id).len(),
+            2,
+            "refund + notify done before the step-4 crash"
+        );
+
+        let done = resume_action_run(repo.path(), &id, None).unwrap();
+        assert_eq!(done.state.status, "completed");
+        let receipts = store::list_receipts(repo.path(), &id);
+        assert_eq!(receipts.len(), 3);
+        assert_eq!(
+            receipts
+                .iter()
+                .filter(|r| r.tool == "fake.stripe.refund")
+                .count(),
+            1
+        );
+        assert_eq!(refund_tool_calls(repo.path(), &id), 1);
+    }
+
+    #[test]
+    fn replay_reproduces_status_and_receipt_set() {
+        // A straight run.
+        let straight_repo = TempRepo::new("act_replay_a");
+        let (spec, plan) = resolve_dup();
+        let s = start_action_run(straight_repo.path(), spec, plan, None).unwrap();
+        let sid = s.state.run_id.clone();
+        approve(straight_repo.path(), &sid, "refund");
+        resume_action_run(straight_repo.path(), &sid, None).unwrap();
+        let rep = replay_action_run(straight_repo.path(), &sid).unwrap();
+        assert!(
+            rep.identical,
+            "replay diverged: {:?} vs {:?}",
+            rep.recorded_status, rep.replayed_status
+        );
+        assert_eq!(rep.replayed_status, "completed");
+
+        // A crashed-and-resumed run reaches the same effects.
+        let crash_repo = TempRepo::new("act_replay_b");
+        let (spec2, plan2) = resolve_dup();
+        let c = start_action_run(crash_repo.path(), spec2, plan2, None).unwrap();
+        let cid = c.state.run_id.clone();
+        approve(crash_repo.path(), &cid, "refund");
+        resume_action_run(crash_repo.path(), &cid, Some(ActionCrash::AfterReceipt(1))).unwrap();
+        resume_action_run(crash_repo.path(), &cid, None).unwrap();
+        assert!(
+            replay_action_run(crash_repo.path(), &cid)
+                .unwrap()
+                .identical
+        );
+
+        // The crashed run's history is longer, yet its effects (receipt outputs,
+        // which are a pure function of the fixed plan inputs) are identical.
+        let n_straight = read_all(&store::events_path(straight_repo.path(), &sid))
+            .unwrap()
+            .len();
+        let n_crash = read_all(&store::events_path(crash_repo.path(), &cid))
+            .unwrap()
+            .len();
+        assert!(
+            n_crash > n_straight,
+            "crash+resume produces strictly more events ({n_crash} vs {n_straight})"
+        );
+        let outputs = |repo: &Path, id: &str| -> BTreeMap<String, serde_json::Value> {
+            store::list_receipts(repo, id)
+                .into_iter()
+                .map(|r| (r.tool, r.output))
+                .collect()
+        };
+        assert_eq!(
+            outputs(straight_repo.path(), &sid),
+            outputs(crash_repo.path(), &cid),
+            "same effects despite different histories"
+        );
+    }
+
+    #[test]
+    fn resume_while_still_pending_is_a_noop() {
+        let repo = TempRepo::new("act_pending");
+        let (spec, plan) = resolve_dup();
+        let r = start_action_run(repo.path(), spec, plan, None).unwrap();
+        let id = r.state.run_id.clone();
+        // Resume WITHOUT approving.
+        let again = resume_action_run(repo.path(), &id, None).unwrap();
+        assert!(again.paused);
+        assert_eq!(
+            again.state.cursor, 1,
+            "cursor did not advance past the gate"
+        );
+        assert_eq!(
+            store::list_approvals(repo.path(), &id).len(),
+            1,
+            "no new approval"
+        );
+        assert!(store::list_receipts(repo.path(), &id).is_empty());
+        assert_eq!(
+            count_kind(repo.path(), &id, kind::APPROVAL_REQUESTED),
+            1,
+            "approval requested exactly once"
+        );
+    }
+
+    #[test]
+    fn deny_then_resume_fails_without_side_effect() {
+        let repo = TempRepo::new("act_deny");
+        let (spec, plan) = resolve_dup();
+        let r = start_action_run(repo.path(), spec, plan, None).unwrap();
+        let id = r.state.run_id.clone();
+        deny(repo.path(), &id, "refund");
+        let done = resume_action_run(repo.path(), &id, None).unwrap();
+        assert_eq!(done.state.status, "denied");
+        assert_eq!(refund_tool_calls(repo.path(), &id), 0);
+        assert!(
+            store::list_receipts(repo.path(), &id)
+                .iter()
+                .all(|r| r.tool != "fake.stripe.refund"),
+            "no refund effect happened"
+        );
+        assert!(count_kind(repo.path(), &id, kind::ACTION_SKIPPED) >= 1);
+    }
+
+    #[test]
+    fn replay_after_denial_reproduces_denied() {
+        let repo = TempRepo::new("act_deny_replay");
+        let (spec, plan) = resolve_dup();
+        let r = start_action_run(repo.path(), spec, plan, None).unwrap();
+        let id = r.state.run_id.clone();
+        deny(repo.path(), &id, "refund");
+        resume_action_run(repo.path(), &id, None).unwrap();
+        let rep = replay_action_run(repo.path(), &id).unwrap();
+        assert!(rep.identical);
+        assert_eq!(rep.replayed_status, "denied");
+    }
+
+    #[test]
+    fn ungranted_tool_fails_before_invocation() {
+        let repo = TempRepo::new("act_authz");
+        let spec = GoalSpec {
+            name: "Authz".into(),
+            success: None,
+            budget: BudgetSpec {
+                steps: Some(10),
+                retries: None,
+                time: None,
+                cost: None,
+            },
+            allow: AllowSpec {
+                tools: vec!["fake.email.send".into()],
+                ..Default::default()
+            },
+            require: vec![],
+        };
+        let plan = ActionPlan {
+            steps: vec![PlannedAction {
+                id: "x".into(),
+                tool: "fake.stripe.refund".into(), // not granted
+                input: serde_json::json!({}),
+                requires_approval: false,
+                effectful: true,
+                summary: String::new(),
+            }],
+        };
+        let r = start_action_run(repo.path(), spec, plan, None).unwrap();
+        assert_eq!(r.state.status, "failed");
+        assert!(store::list_receipts(repo.path(), &r.state.run_id).is_empty());
+        assert_eq!(
+            count_kind(repo.path(), &r.state.run_id, kind::TOOL_CALLED),
+            0
+        );
+    }
+
+    #[test]
+    fn budget_does_not_strand_a_granted_gate() {
+        // A budget tight enough to stop after the refund must still HONOR an already
+        // granted gate (the refund), not void it — then stop before the next action.
+        let repo = TempRepo::new("act_budget");
+        let (mut spec, plan) = resolve_dup();
+        spec.budget.steps = Some(2); // allow cursor 0 (lookup) and 1 (refund) only
+        let r = start_action_run(repo.path(), spec, plan, None).unwrap();
+        let id = r.state.run_id.clone();
+        assert!(r.paused);
+        approve(repo.path(), &id, "refund");
+        let done = resume_action_run(repo.path(), &id, None).unwrap();
+        assert_eq!(done.state.status, "budget_exhausted");
+        assert_eq!(
+            refund_tool_calls(repo.path(), &id),
+            1,
+            "the granted refund executed and was not stranded by the budget"
+        );
+        assert_eq!(store::list_receipts(repo.path(), &id).len(), 1);
+    }
+
+    #[test]
+    fn tool_failure_mid_plan_is_durable() {
+        // A later tool failure must not undo an earlier committed effect.
+        let repo = TempRepo::new("act_toolfail");
+        let spec = GoalSpec {
+            name: "FailMid".into(),
+            success: None,
+            budget: BudgetSpec {
+                steps: Some(10),
+                retries: None,
+                time: None,
+                cost: None,
+            },
+            allow: AllowSpec {
+                tools: vec!["fake.stripe.refund".into(), "fake.broken".into()],
+                ..Default::default()
+            },
+            require: vec![],
+        };
+        let plan = ActionPlan {
+            steps: vec![
+                PlannedAction {
+                    id: "refund".into(),
+                    tool: "fake.stripe.refund".into(),
+                    input: serde_json::json!({ "amount_cents": 100 }),
+                    requires_approval: false,
+                    effectful: true,
+                    summary: String::new(),
+                },
+                PlannedAction {
+                    id: "boom".into(),
+                    tool: "fake.broken".into(), // granted, but invoke_fake_tool errors
+                    input: serde_json::json!({}),
+                    requires_approval: false,
+                    effectful: true,
+                    summary: String::new(),
+                },
+            ],
+        };
+        let r = start_action_run(repo.path(), spec, plan, None).unwrap();
+        let id = r.state.run_id.clone();
+        assert_eq!(r.state.status, "failed");
+        assert_eq!(count_kind(repo.path(), &id, kind::TOOL_FAILED), 1);
+        let receipts = store::list_receipts(repo.path(), &id);
+        assert_eq!(
+            receipts
+                .iter()
+                .filter(|x| x.tool == "fake.stripe.refund")
+                .count(),
+            1,
+            "the earlier refund receipt survives the later failure"
+        );
+    }
+
+    #[test]
+    fn ship_hotfix_pr_full_flow() {
+        let repo = TempRepo::new("ship_pr");
+        let (spec, plan) = action::builtin_action_goal("ShipHotfixPR").unwrap();
+        let r = start_action_run(repo.path(), spec, plan, None).unwrap();
+        let id = r.state.run_id.clone();
+        assert!(r.paused, "pauses on the create_pr gate");
+        approve(repo.path(), &id, "open_pr");
+        let done = resume_action_run(repo.path(), &id, None).unwrap();
+        assert_eq!(done.state.status, "completed");
+        let receipts = store::list_receipts(repo.path(), &id);
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(
+            receipts
+                .iter()
+                .filter(|x| x.tool == "fake.github.create_pr")
+                .count(),
+            1
+        );
+        assert!(replay_action_run(repo.path(), &id).unwrap().identical);
+    }
+
+    #[test]
+    fn action_run_writes_only_under_dot_tach() {
+        let repo = TempRepo::new("act_nofiles");
+        let (spec, plan) = resolve_dup();
+        start_action_run(repo.path(), spec, plan, None).unwrap();
+        let entries: Vec<String> = std::fs::read_dir(repo.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(
+            entries,
+            vec![".tach".to_string()],
+            "an action goal writes nothing into the working tree"
+        );
+    }
+
+    #[test]
+    fn old_state_json_loads_with_defaults() {
+        let repo = TempRepo::new("act_backcompat");
+        let run_id = "run_old";
+        let dir = store::run_dir(repo.path(), run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A state.json written before the action layer (no kind/cursor/etc.).
+        let old = r#"{"run_id":"run_old","goal":"X","status":"running","step":2,"consecutive_rejections":0,"patches_applied":1,"patches_rejected":0,"tests_run":3,"regressions":0,"diff_chars":4,"final_errors":0,"tests_passed":3,"tests_failed":0}"#;
+        std::fs::write(dir.join("state.json"), old).unwrap();
+        let s = store::load_state(repo.path(), run_id).unwrap();
+        assert_eq!(s.kind, "");
+        assert_eq!(s.cursor, 0);
+        assert!(s.pending_approval.is_none());
+        assert_eq!(s.receipts_created, 0);
+    }
+
+    #[test]
+    fn idempotency_key_is_object_order_independent() {
+        let a = serde_json::json!({ "x": 1, "y": 2, "z": "q" });
+        let mut m = serde_json::Map::new();
+        m.insert("z".into(), serde_json::json!("q"));
+        m.insert("y".into(), serde_json::json!(2));
+        m.insert("x".into(), serde_json::json!(1));
+        let b = serde_json::Value::Object(m);
+        assert_eq!(store::canonical_bytes(&a), store::canonical_bytes(&b));
+        assert_eq!(
+            store::idempotency_key("r", "act", "t", &a),
+            store::idempotency_key("r", "act", "t", &b)
+        );
+    }
+
+    #[test]
+    fn approval_id_is_deterministic_offline() {
+        assert_eq!(
+            store::approval_id("run_x", "refund"),
+            store::approval_id("run_x", "refund")
+        );
+        assert_ne!(
+            store::approval_id("run_x", "refund"),
+            store::approval_id("run_y", "refund")
+        );
+        assert!(store::approval_id("run_x", "refund").starts_with("apr_"));
     }
 }

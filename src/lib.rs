@@ -10,6 +10,7 @@
 //! without guessing. The goal runtime wraps that loop in durability: budgets,
 //! authority scopes, append-only event history, checkpoints, resume, and replay.
 
+pub mod action;
 pub mod agent;
 pub mod ast;
 pub mod builtins;

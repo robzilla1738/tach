@@ -32,8 +32,9 @@ fn dot(status: &str) -> String {
 pub fn status_dot(status: &str) -> String {
     match status {
         "completed" => term::bold_green("●"),
-        "failed" | "budget_exhausted" => term::bold_red("●"),
+        "failed" | "budget_exhausted" | "denied" => term::bold_red("●"),
         "cancelled" => term::dim("●"),
+        // running / awaiting_approval and anything else: in-flight.
         _ => term::bold_yellow("●"),
     }
 }
@@ -50,15 +51,24 @@ pub fn run_state(s: &crate::store::RunState) -> String {
     let row = |k: &str, v: String| format!("  {:<20} {}\n", k, v);
     out.push_str(&row("status", s.status.clone()));
     out.push_str(&row("steps", s.step.to_string()));
-    out.push_str(&row("patches-applied", s.patches_applied.to_string()));
-    out.push_str(&row("patches-rejected", s.patches_rejected.to_string()));
-    out.push_str(&row("tests-run", s.tests_run.to_string()));
-    out.push_str(&row("regressions", s.regressions.to_string()));
-    out.push_str(&row("diff-size", format!("{} chars", s.diff_chars)));
-    out.push_str(&row(
-        "tests",
-        format!("{} passed, {} failed", s.tests_passed, s.tests_failed),
-    ));
+    if s.kind == "action" {
+        out.push_str(&row("actions-executed", s.actions_executed.to_string()));
+        out.push_str(&row("cursor", s.cursor.to_string()));
+        out.push_str(&row("receipts", s.receipts_created.to_string()));
+        if let Some(a) = &s.pending_approval {
+            out.push_str(&row("awaiting-approval", a.clone()));
+        }
+    } else {
+        out.push_str(&row("patches-applied", s.patches_applied.to_string()));
+        out.push_str(&row("patches-rejected", s.patches_rejected.to_string()));
+        out.push_str(&row("tests-run", s.tests_run.to_string()));
+        out.push_str(&row("regressions", s.regressions.to_string()));
+        out.push_str(&row("diff-size", format!("{} chars", s.diff_chars)));
+        out.push_str(&row(
+            "tests",
+            format!("{} passed, {} failed", s.tests_passed, s.tests_failed),
+        ));
+    }
     out
 }
 
@@ -83,9 +93,16 @@ pub fn events(evs: &[crate::event::Event]) -> String {
 
 fn event_kind_colored(kind: &str) -> String {
     match kind {
-        "patch.applied" | "run.completed" | "patch.verified" => term::green(kind),
-        "patch.rejected" | "run.failed" | "budget.exhausted" => term::red(kind),
-        "effect.delta_detected" | "run.resumed" => term::yellow(kind),
+        "patch.applied" | "run.completed" | "patch.verified" | "approval.granted"
+        | "tool.completed" | "receipt.created" => term::green(kind),
+        "patch.rejected" | "run.failed" | "budget.exhausted" | "approval.denied"
+        | "tool.failed" => term::red(kind),
+        "effect.delta_detected"
+        | "run.resumed"
+        | "approval.requested"
+        | "action.proposed"
+        | "receipt.reused"
+        | "action.skipped" => term::yellow(kind),
         _ => kind.to_string(),
     }
 }
@@ -95,7 +112,32 @@ fn event_detail(e: &crate::event::Event) -> String {
     let p = &e.payload;
     let s = |k: &str| p.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
     match e.kind.as_str() {
-        "run.started" => format!("goal {} · strategy {}", s("goal"), s("strategy")),
+        "run.started" => {
+            let k = s("kind");
+            if k.is_empty() {
+                format!("goal {} · strategy {}", s("goal"), s("strategy"))
+            } else {
+                format!("goal {} · {}", s("goal"), k)
+            }
+        }
+        "action.proposed" => {
+            let summary = s("summary");
+            if summary.is_empty() {
+                s("tool")
+            } else {
+                format!("{} · {}", s("tool"), summary)
+            }
+        }
+        "approval.requested" => format!("{} for {}", s("approval_id"), s("action")),
+        "approval.granted" | "approval.denied" => {
+            format!("{} ({})", s("approval_id"), s("action"))
+        }
+        "tool.called" => format!("{} · {}", s("tool"), s("action")),
+        "tool.completed" => s("tool"),
+        "tool.failed" => format!("{}: {}", s("tool"), s("error")),
+        "receipt.created" => format!("{} · {}", s("receipt_id"), s("tool")),
+        "receipt.reused" => format!("{} (idempotent — no re-call)", s("receipt_id")),
+        "action.skipped" => format!("{} — {}", s("action"), s("reason")),
         "diagnostic.emitted" => format!("{} {}", s("code"), s("kind")),
         "patch.proposed" => s("name"),
         "patch.applied" => s("patch"),
@@ -413,4 +455,67 @@ pub fn audit(program: &Program) -> String {
         s.push_str(&format!("  {}\n", term::dim("no functions found")));
     }
     s
+}
+
+/// A run's approval gates: status, id, the tool, and the human-readable intent.
+pub fn approvals(items: &[crate::store::Approval]) -> String {
+    let mut out = format!("{}\n\n", term::bold("approvals"));
+    for a in items {
+        let dot = match a.status.as_str() {
+            "granted" => term::bold_green("●"),
+            "denied" => term::bold_red("●"),
+            _ => term::bold_yellow("●"),
+        };
+        out.push_str(&format!(
+            "  {} {:<9} {}  {}\n",
+            dot,
+            a.status,
+            term::bold(&a.id),
+            term::dim(&a.tool)
+        ));
+        if !a.summary.is_empty() {
+            out.push_str(&format!("       {}\n", term::dim(&a.summary)));
+        }
+        if let Some(n) = &a.note {
+            out.push_str(&format!("       {}\n", term::dim(&format!("note: {}", n))));
+        }
+    }
+    out
+}
+
+/// A run's effect receipts — the durable proof that each effectful action ran once.
+pub fn receipts(items: &[crate::store::Receipt]) -> String {
+    let mut out = format!("{}\n\n", term::bold("receipts"));
+    for r in items {
+        out.push_str(&format!(
+            "  {} {}  {}  {}\n",
+            term::bold_green("●"),
+            term::bold(&r.receipt_id),
+            term::dim(&r.tool),
+            term::dim(&r.action_id)
+        ));
+        out.push_str(&format!(
+            "       {}\n",
+            term::dim(&format!("key {}", r.idempotency_key))
+        ));
+    }
+    out
+}
+
+/// A single receipt in full: its identity, the tool, and the input/output it proves.
+pub fn receipt(r: &crate::store::Receipt) -> String {
+    let mut out = format!("{} {}\n", term::bold_green("●"), term::bold(&r.receipt_id));
+    let row = |k: &str, v: String| format!("  {:<14} {}\n", k, v);
+    out.push_str(&row("tool", r.tool.clone()));
+    out.push_str(&row("action", r.action_id.clone()));
+    out.push_str(&row("idempotency", r.idempotency_key.clone()));
+    out.push_str(&row(
+        "input",
+        serde_json::to_string(&r.input).unwrap_or_default(),
+    ));
+    out.push_str(&row(
+        "output",
+        serde_json::to_string(&r.output).unwrap_or_default(),
+    ));
+    out
 }

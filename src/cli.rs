@@ -122,10 +122,11 @@ fn errors_only(diags: &[Diagnostic]) -> Vec<Diagnostic> {
 // ----- commands -----
 
 fn cmd_new(rest: &[String]) -> i32 {
-    let p = parse(rest, &[]);
+    let p = parse(rest, &["--goal", "--goal-template"]);
     let clean = p.has("--clean");
+    let plan_template = p.get("--goal").or_else(|| p.get("--goal-template"));
     let name = p.pos.first().cloned().unwrap_or_else(|| "demo".into());
-    match project::scaffold(&cwd(), &name, clean) {
+    match project::scaffold(&cwd(), &name, clean, plan_template) {
         Ok(dir) => {
             println!(
                 "  {} created {}",
@@ -133,7 +134,31 @@ fn cmd_new(rest: &[String]) -> i32 {
                 term::bold(&dir.display().to_string())
             );
             println!();
-            if clean {
+            if let Some(tmpl) = plan_template {
+                println!(
+                    "  {}",
+                    term::dim(&format!(
+                        "a workspace-authored plan goal ({tmpl}) — a durable workflow you own."
+                    ))
+                );
+                println!();
+                println!("    cd {}", name);
+                println!(
+                    "    {}  {}",
+                    term::bold("tach goal check ReconcileLocalDemo"),
+                    term::dim("# validate the plan")
+                );
+                println!(
+                    "    {}    {}",
+                    term::bold("tach goal run ReconcileLocalDemo"),
+                    term::dim("# runs to the first approval gate, then pauses")
+                );
+                println!(
+                    "    {}              {}",
+                    term::bold("tach goal approvals <id>"),
+                    term::dim("# grant it, then `tach goal resume <id>`")
+                );
+            } else if clean {
                 println!("  {}", term::dim("a minimal, green project."));
                 println!("  next:  cd {} && tach run", name);
             } else {
@@ -778,6 +803,7 @@ fn cmd_goal(rest: &[String]) -> i32 {
     };
     match sub {
         "run" => cmd_goal_run(&rest),
+        "check" => cmd_goal_check(&rest),
         "list" => cmd_goal_list(&rest),
         "inspect" => cmd_goal_inspect(&rest),
         "resume" => cmd_goal_resume(&rest),
@@ -931,7 +957,15 @@ fn cmd_goal_run(rest: &[String]) -> i32 {
             );
         }
         let crash = crash_after.map(runtime::ActionCrash::Step);
-        let result = match runtime::start_plan_run(&root, spec, plan_block, crash) {
+        // A built-in goal carries no source snapshot; the plan is re-derived from
+        // the catalog on resume.
+        let result = match runtime::start_plan_run(
+            &root,
+            spec,
+            plan_block,
+            std::collections::BTreeMap::new(),
+            crash,
+        ) {
             Ok(r) => r,
             Err(e) => {
                 eprintln!("{} {}", term::bold_red("error:"), e);
@@ -968,6 +1002,10 @@ fn cmd_goal_run(rest: &[String]) -> i32 {
         }
     };
     let spec = GoalSpec::from_decl(decl);
+    // A goal that carries a `plan { … }` block is a durable workflow, not a repair
+    // run. It needs no source to *fix*, but we snapshot the workspace so resume and
+    // replay re-parse the frozen plan rather than the live (possibly edited) file.
+    let plan_block = decl.plan.clone();
 
     // A fresh run never overwrites a prior one. If earlier runs of this goal over
     // this source exist, say so — and point at resume in case one was unfinished.
@@ -992,6 +1030,19 @@ fn cmd_goal_run(rest: &[String]) -> i32 {
                 }
             }
         }
+    }
+
+    if let Some(plan_block) = plan_block {
+        let crash = crash_after.map(runtime::ActionCrash::Step);
+        let result = match runtime::start_plan_run(&root, spec, plan_block, ws.files.clone(), crash)
+        {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("{} {}", term::bold_red("error:"), e);
+                return 1;
+            }
+        };
+        return finish_run(&root, result, dry);
     }
 
     let result = match runtime::start_run(&root, spec, ws, strat, crash_after) {
@@ -1049,6 +1100,85 @@ fn cmd_goal_resume(rest: &[String]) -> i32 {
         }
     };
     finish_run(&root, result, dry)
+}
+
+/// `tach goal check <name>` — statically validate a workspace goal (its plan, if it
+/// has one) before any run. A focused view of the same checks `tach check` runs.
+fn cmd_goal_check(rest: &[String]) -> i32 {
+    let p = parse(rest, &[]);
+    let name = match p.pos.first() {
+        Some(n) => n.clone(),
+        None => {
+            eprintln!("{} usage: tach goal check <name>", term::bold_red("error:"));
+            return 2;
+        }
+    };
+    let ws = match project::load_workspace(&cwd()) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("{} {}", term::bold_red("error:"), e);
+            return 1;
+        }
+    };
+    let (prog, _) = ws.program();
+    let diags = match check::check_named_goal(&prog, &name) {
+        Some(d) => d,
+        None => {
+            // Not authored in this workspace. Built-in goals ship verified.
+            if action::builtin_action_goal(&name).is_some()
+                || plan::builtin_plan_goal(&name).is_some()
+            {
+                println!(
+                    "  {} `{}` is a built-in goal — its plan ships verified",
+                    term::bold_green("●"),
+                    name
+                );
+                return 0;
+            }
+            eprintln!(
+                "{} no goal named `{}` in this workspace",
+                term::bold_red("error:"),
+                name
+            );
+            let names: Vec<String> = goal::all_goals(&prog)
+                .iter()
+                .map(|g| g.name.clone())
+                .collect();
+            if !names.is_empty() {
+                eprintln!("  available goals: {}", names.join(", "));
+            }
+            return 1;
+        }
+    };
+    if p.has("--json") {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&diags).unwrap_or_default()
+        );
+        return if diags.iter().any(|d| d.is_error()) {
+            1
+        } else {
+            0
+        };
+    }
+    if diags.is_empty() {
+        println!("  {} goal `{}` checks out", term::bold_green("●"), name);
+        return 0;
+    }
+    print!("{}", render::diagnostics(&diags, &ws));
+    let errs = diags.iter().filter(|d| d.is_error()).count();
+    let warns = diags.len() - errs;
+    let lead = if errs == 0 {
+        term::bold_yellow("●")
+    } else {
+        term::bold_red("●")
+    };
+    println!("  {} {} error(s), {} warning(s)", lead, errs, warns);
+    if errs > 0 {
+        1
+    } else {
+        0
+    }
 }
 
 /// Shared tail for `run`/`resume`: print the outcome, write verified files back on
@@ -1472,6 +1602,10 @@ fn print_goal_help() {
     cmd(
         "goal run <name>",
         "start a durable run (--strategy, --crash-after step:N)",
+    );
+    cmd(
+        "goal check <name>",
+        "statically validate a goal's plan before running it (--json)",
     );
     cmd("goal list", "list runs in the store");
     cmd(

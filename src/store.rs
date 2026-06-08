@@ -111,6 +111,13 @@ pub struct Approval {
 /// Durable proof that an effectful action ran. Keyed by an idempotency key derived
 /// from the action; re-entering the same action on resume finds this receipt and
 /// skips the tool call, so a side effect happens exactly once.
+///
+/// Beyond the exactly-once core (`idempotency_key` + `output`), a receipt is
+/// self-describing for audit: it records the run it belongs to, the step it
+/// committed at, the effect it represents, a content hash of the input, the
+/// approval that authorized it (if gated), and the history event that recorded it.
+/// The extra fields are `#[serde(default)]` so receipts written before they existed
+/// still load.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Receipt {
     pub receipt_id: String,
@@ -119,6 +126,18 @@ pub struct Receipt {
     pub tool: String,
     pub input: Value,
     pub output: Value,
+    #[serde(default)]
+    pub run_id: String,
+    #[serde(default)]
+    pub step: u64,
+    #[serde(default)]
+    pub effect: String,
+    #[serde(default)]
+    pub input_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_id: Option<String>,
+    #[serde(default)]
+    pub created_event_id: String,
 }
 
 pub fn goals_root(repo: &Path) -> PathBuf {
@@ -500,6 +519,14 @@ pub fn approval_id(run_id: &str, action_id: &str) -> String {
 /// The deterministic receipt id for an idempotency key.
 pub fn receipt_id(idempotency_key: &str) -> String {
     format!("rcpt_{}", &fnv1a_hex(&[idempotency_key.as_bytes()])[..12])
+}
+
+/// A content hash of a tool's input, recorded on the receipt so an audit can tell
+/// two effects apart (or spot a duplicate) without re-canonicalizing the value.
+/// Derived from the same canonical bytes as the idempotency key, so it depends only
+/// on the input's content, not its serde key order.
+pub fn input_hash(v: &Value) -> String {
+    format!("ih_{}", fnv1a_hex(&[&canonical_bytes(v)]))
 }
 
 /// A short stable hex digest of a JSON value, used by fake tools to mint

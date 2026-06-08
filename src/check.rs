@@ -87,7 +87,12 @@ pub fn check_program(program: &Program) -> Vec<Diagnostic> {
                     check_block_fields(&t.body, &mut env, unit, &reg, &sigs, &mut diags);
                     check_unused_vars(&t.body, unit, &mut diags);
                 }
-                Item::Goal(g) => check_goal(g, unit, &mut diags),
+                Item::Goal(g) => {
+                    check_goal(g, unit, &mut diags);
+                    if g.plan.is_some() {
+                        check_plan_goal(g, unit, &mut diags);
+                    }
+                }
                 _ => {}
             }
         }
@@ -112,24 +117,29 @@ pub const KNOWN_REQUIRE_CONDS: &[&str] = &[
 /// design) but strict about *require* conditions, which must be ones the runtime
 /// can actually evaluate.
 fn check_goal(g: &GoalDecl, unit: &Unit, diags: &mut Vec<Diagnostic>) {
-    for c in &g.require.conditions {
-        if !KNOWN_REQUIRE_CONDS.contains(&c.name.as_str()) {
-            diags.push(
-                Diagnostic::warning(
-                    "E0431",
-                    "unknown_require_condition",
-                    format!(
-                        "`{}` is not a success condition the runtime can check",
-                        c.name
-                    ),
-                    &unit.source.path,
-                    c.span,
-                )
-                .with_note(format!(
-                    "known conditions: {}",
-                    KNOWN_REQUIRE_CONDS.join(", ")
-                )),
-            );
+    // A plan goal's success conditions use a different, not-yet-enforced vocabulary
+    // (e.g. `refunds.receipted`), so the repair-loop condition check doesn't apply.
+    // Its plan is validated separately by `check_plan_goal`.
+    if g.plan.is_none() {
+        for c in &g.require.conditions {
+            if !KNOWN_REQUIRE_CONDS.contains(&c.name.as_str()) {
+                diags.push(
+                    Diagnostic::warning(
+                        "E0431",
+                        "unknown_require_condition",
+                        format!(
+                            "`{}` is not a success condition the runtime can check",
+                            c.name
+                        ),
+                        &unit.source.path,
+                        c.span,
+                    )
+                    .with_note(format!(
+                        "known conditions: {}",
+                        KNOWN_REQUIRE_CONDS.join(", ")
+                    )),
+                );
+            }
         }
     }
     // A goal with no budget at all will run unbounded; nudge the author.
@@ -146,6 +156,241 @@ fn check_goal(g: &GoalDecl, unit: &Unit, diags: &mut Vec<Diagnostic>) {
             .with_note("add a `budget { steps: N }` block so the run is bounded"),
         );
     }
+}
+
+/// Validate a single named goal — its require/budget and, if present, its plan
+/// body. Returns `None` if the program has no goal by that name. Powers
+/// `tach goal check <name>`.
+pub fn check_named_goal(program: &Program, name: &str) -> Option<Vec<Diagnostic>> {
+    for unit in &program.units {
+        for item in &unit.module.items {
+            if let Item::Goal(g) = item {
+                if g.name == name {
+                    let mut diags = Vec::new();
+                    check_goal(g, unit, &mut diags);
+                    if g.plan.is_some() {
+                        check_plan_goal(g, unit, &mut diags);
+                    }
+                    return Some(diags);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Statically validate a goal's `plan { … }` block so a bad plan fails *before*
+/// runtime. Deliberately tuned to never reject a plan the runtime would happily
+/// run: its scope model matches the interpreter's single flat `Env` (let-names and
+/// for-vars accumulate and never go out of scope), and its unsupported-expression
+/// set mirrors `plan::eval_expr` exactly.
+pub fn check_plan_goal(g: &GoalDecl, unit: &Unit, diags: &mut Vec<Diagnostic>) {
+    let plan = match &g.plan {
+        Some(p) => p,
+        None => return,
+    };
+    let granted: BTreeSet<String> = g.allow.tools.iter().cloned().collect();
+    let known: Vec<String> = crate::action::known_tools()
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let mut bound: BTreeSet<String> = BTreeSet::new();
+    check_plan_stmts(&plan.stmts, &granted, &known, &mut bound, unit, diags);
+}
+
+fn check_plan_stmts(
+    stmts: &[PlanStmt],
+    granted: &BTreeSet<String>,
+    known: &[String],
+    bound: &mut BTreeSet<String>,
+    unit: &Unit,
+    diags: &mut Vec<Diagnostic>,
+) {
+    for s in stmts {
+        match s {
+            PlanStmt::Let { name, value, .. } => {
+                match value {
+                    PlanValue::Call(c) => check_plan_call(c, granted, known, bound, unit, diags),
+                    PlanValue::Expr(e) => check_plan_expr(e, bound, unit, diags),
+                }
+                // The binding is visible only AFTER its right-hand side (a `let x = x`
+                // reads the prior `x`), matching the interpreter.
+                bound.insert(name.clone());
+            }
+            PlanStmt::Call { call, .. } => {
+                check_plan_call(call, granted, known, bound, unit, diags)
+            }
+            PlanStmt::Approve { body, .. } => {
+                check_plan_stmts(body, granted, known, bound, unit, diags)
+            }
+            PlanStmt::If {
+                cond, then, els, ..
+            } => {
+                check_plan_expr(cond, bound, unit, diags);
+                check_plan_stmts(then, granted, known, bound, unit, diags);
+                if let Some(els) = els {
+                    check_plan_stmts(els, granted, known, bound, unit, diags);
+                }
+            }
+            PlanStmt::For {
+                var, iter, body, ..
+            } => {
+                check_plan_expr(iter, bound, unit, diags);
+                // The loop variable is in scope for the body (and, like the runtime's
+                // flat Env, stays bound afterward — so the checker never over-rejects).
+                bound.insert(var.clone());
+                check_plan_stmts(body, granted, known, bound, unit, diags);
+            }
+            PlanStmt::While { cond, body, span } => {
+                check_plan_expr(cond, bound, unit, diags);
+                if !plan_stmts_have_call(body) {
+                    diags.push(
+                        Diagnostic::warning(
+                            "E0437",
+                            "unbounded_plan_loop",
+                            "this `while` loop makes no tool call, so it is bounded only by the run's iteration limit",
+                            &unit.source.path,
+                            *span,
+                        )
+                        .with_note("call a tool inside the loop so each iteration makes durable progress"),
+                    );
+                }
+                check_plan_stmts(body, granted, known, bound, unit, diags);
+            }
+        }
+    }
+}
+
+fn check_plan_call(
+    c: &PlanCall,
+    granted: &BTreeSet<String>,
+    known: &[String],
+    bound: &BTreeSet<String>,
+    unit: &Unit,
+    diags: &mut Vec<Diagnostic>,
+) {
+    if !known.contains(&c.tool) {
+        let mut d = Diagnostic::error(
+            "E0434",
+            "unknown_tool",
+            format!("`{}` is not a tool the runtime can invoke", c.tool),
+            &unit.source.path,
+            c.tool_span,
+        );
+        if let Some(near) = nearest_name(&c.tool, known) {
+            d = d.with_note(format!("did you mean `{near}`?"));
+        }
+        diags.push(d);
+    } else if !granted.contains(&c.tool) {
+        diags.push(
+            Diagnostic::error(
+                "E0433",
+                "tool_ungranted",
+                format!(
+                    "the plan calls `{}`, which the goal's `allow` block does not grant",
+                    c.tool
+                ),
+                &unit.source.path,
+                c.tool_span,
+            )
+            .with_note(format!("add `{}` to the goal's `allow` block", c.tool)),
+        );
+    }
+    for (_, e) in &c.input {
+        check_plan_expr(e, bound, unit, diags);
+    }
+}
+
+/// Walk a plan expression for unbound variables (E0435) and expression forms the
+/// plan interpreter rejects (E0436 — exactly the set `plan::eval_expr` errors on).
+fn check_plan_expr(e: &Expr, bound: &BTreeSet<String>, unit: &Unit, diags: &mut Vec<Diagnostic>) {
+    match e {
+        Expr::Int(..) | Expr::Float(..) | Expr::Str(..) | Expr::Bool(..) => {}
+        Expr::Ident(name, span) => {
+            if !bound.contains(name) {
+                let cands: Vec<String> = bound.iter().cloned().collect();
+                let mut d = Diagnostic::error(
+                    "E0435",
+                    "unbound_plan_var",
+                    format!("`{name}` is not bound anywhere in this plan"),
+                    &unit.source.path,
+                    *span,
+                );
+                if let Some(near) = nearest_name(name, &cands) {
+                    d = d.with_note(format!("did you mean `{near}`?"));
+                }
+                diags.push(d);
+            }
+        }
+        Expr::Field { recv, .. } => check_plan_expr(recv, bound, unit, diags),
+        Expr::Unary { expr, .. } => check_plan_expr(expr, bound, unit, diags),
+        Expr::Binary { lhs, rhs, .. } => {
+            check_plan_expr(lhs, bound, unit, diags);
+            check_plan_expr(rhs, bound, unit, diags);
+        }
+        Expr::Record { fields, .. } => {
+            for (_, fe) in fields {
+                check_plan_expr(fe, bound, unit, diags);
+            }
+        }
+        // The forms the plan interpreter does not evaluate. Message mirrors
+        // `plan::eval_expr` so the static error reads like the runtime one.
+        Expr::Call { span, .. } => diags.push(unsupported_plan_expr(
+            "function calls are not allowed in a plan expression (use `call <tool> { ... }`)",
+            unit,
+            *span,
+        )),
+        Expr::Method {
+            name, name_span, ..
+        } => diags.push(unsupported_plan_expr(
+            format!("method `.{name}()` is not supported in a plan expression"),
+            unit,
+            *name_span,
+        )),
+        Expr::Try { span, .. } => diags.push(unsupported_plan_expr(
+            "`?` is not supported in a plan expression",
+            unit,
+            *span,
+        )),
+        Expr::Match { span, .. } => diags.push(unsupported_plan_expr(
+            "`match` is not supported in a plan expression",
+            unit,
+            *span,
+        )),
+        Expr::Ok(_, span) | Expr::Err(_, span) => diags.push(unsupported_plan_expr(
+            "`Ok`/`Err` are not supported in a plan expression",
+            unit,
+            *span,
+        )),
+    }
+}
+
+fn unsupported_plan_expr(msg: impl Into<String>, unit: &Unit, span: Span) -> Diagnostic {
+    Diagnostic::error(
+        "E0436",
+        "unsupported_plan_expr",
+        msg,
+        &unit.source.path,
+        span,
+    )
+}
+
+/// Whether a plan body makes any tool call, recursing through nested control flow.
+/// Used to flag a `while` loop that can only spin against the iteration limit.
+fn plan_stmts_have_call(stmts: &[PlanStmt]) -> bool {
+    stmts.iter().any(|s| match s {
+        PlanStmt::Call { .. } => true,
+        PlanStmt::Let {
+            value: PlanValue::Call(_),
+            ..
+        } => true,
+        PlanStmt::Let { .. } => false,
+        PlanStmt::Approve { body, .. } => plan_stmts_have_call(body),
+        PlanStmt::If { then, els, .. } => {
+            plan_stmts_have_call(then) || els.as_deref().is_some_and(plan_stmts_have_call)
+        }
+        PlanStmt::For { body, .. } | PlanStmt::While { body, .. } => plan_stmts_have_call(body),
+    })
 }
 
 fn build_sigs(program: &Program) -> HashMap<String, FnSig> {
@@ -1435,5 +1680,127 @@ fn compute(x: Int) -> Int {
             "no unused_variable expected: {:?}",
             diags
         );
+    }
+
+    // ----- plan-goal checker (`tach goal check`) -----
+
+    fn plan_diag_kinds(src: &str) -> Vec<String> {
+        let (prog, pd) = Program::parse_sources(vec![SourceFile::new("g.tach", src)]);
+        assert!(pd.iter().all(|d| !d.is_error()), "parse errors: {pd:?}");
+        check_program(&prog)
+            .iter()
+            .map(|d| d.kind.clone())
+            .collect()
+    }
+
+    /// A `while` retry loop that rebinds its condition variables (`attempt`,
+    /// `result`) inside the body — the case most likely to provoke a false unbound
+    /// error. It must check perfectly clean.
+    const DEPLOY_SRC: &str = r#"goal LocalDeploy -> Success {
+  budget { steps: 20 }
+  allow { fake.ci.deploy fake.zendesk.comment }
+  require { deploy.receipted }
+  plan {
+    let attempt = 1
+    let result = call fake.ci.deploy { service: "api", attempt: attempt }
+    while !result.ok && attempt < 5 {
+      let attempt = attempt + 1
+      let result = call fake.ci.deploy { service: "api", attempt: attempt }
+    }
+    approve "announce" {
+      call fake.zendesk.comment { ticket_id: "zd", body: "done", public: true }
+    }
+  }
+}"#;
+
+    #[test]
+    fn valid_plan_goals_check_clean() {
+        // The scaffold's chargebacks demo and a rebinding while-loop both pass with
+        // zero diagnostics — no false positives, and no E0431 on `refunds.receipted`.
+        assert!(
+            plan_diag_kinds(crate::project::PLAN_DEMO_CHARGEBACKS).is_empty(),
+            "chargebacks demo should check clean"
+        );
+        assert!(
+            plan_diag_kinds(DEPLOY_SRC).is_empty(),
+            "rebinding while loop should check clean"
+        );
+    }
+
+    #[test]
+    fn plan_flags_ungranted_tool() {
+        let src = r#"goal G -> Success {
+  budget { steps: 5 }
+  allow { fake.email.send }
+  plan { call fake.stripe.refund { charge_id: "c", amount_cents: 1 } }
+}"#;
+        assert!(plan_diag_kinds(src).contains(&"tool_ungranted".to_string()));
+    }
+
+    #[test]
+    fn plan_flags_unknown_tool_with_suggestion() {
+        let src = r#"goal G -> Success {
+  budget { steps: 5 }
+  allow { fake.stripe.refundd }
+  plan { call fake.stripe.refundd { charge_id: "c" } }
+}"#;
+        let (prog, _) = Program::parse_sources(vec![SourceFile::new("g.tach", src)]);
+        let diags = check_program(&prog);
+        let unknown = diags
+            .iter()
+            .find(|d| d.kind == "unknown_tool")
+            .expect("E0434");
+        assert!(
+            unknown
+                .notes
+                .iter()
+                .any(|n| n.contains("fake.stripe.refund")),
+            "did-you-mean note: {:?}",
+            unknown.notes
+        );
+    }
+
+    #[test]
+    fn plan_flags_unbound_variable() {
+        let src = r#"goal G -> Success {
+  budget { steps: 5 }
+  allow { fake.email.send }
+  plan { call fake.email.send { to: missing } }
+}"#;
+        assert!(plan_diag_kinds(src).contains(&"unbound_plan_var".to_string()));
+    }
+
+    #[test]
+    fn plan_flags_unsupported_expression() {
+        let src = r#"goal G -> Success {
+  budget { steps: 5 }
+  allow { fake.email.send }
+  plan {
+    let x = call fake.email.send { to: "a" }
+    call fake.email.send { to: x.field.unwrap() }
+  }
+}"#;
+        assert!(plan_diag_kinds(src).contains(&"unsupported_plan_expr".to_string()));
+    }
+
+    #[test]
+    fn plan_flags_a_while_loop_with_no_call() {
+        let src = r#"goal G -> Success {
+  budget { steps: 5 }
+  allow { fake.email.send }
+  plan {
+    let n = 0
+    while n < 3 { let n = n + 1 }
+  }
+}"#;
+        assert!(plan_diag_kinds(src).contains(&"unbounded_plan_loop".to_string()));
+    }
+
+    #[test]
+    fn plan_goal_require_condition_is_not_flagged() {
+        // `refunds.receipted` is a plan-goal condition, not a repair one — E0431
+        // must not fire for a goal that carries a plan block.
+        assert!(!plan_diag_kinds(crate::project::PLAN_DEMO_CHARGEBACKS)
+            .contains(&"unknown_require_condition".to_string()));
     }
 }

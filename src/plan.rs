@@ -296,7 +296,9 @@ const RECONCILE_CHARGEBACKS: &str = r#"goal ReconcileChargebacks -> Success {
     refunds.receipted
   }
   plan {
-    let disputes = call fake.stripe.list_disputes { customer: "cus_42" }
+    let disputes = call fake.stripe.list_disputes {
+      customer: "cus_42"
+    }
     for charge in disputes.charges {
       if charge.is_duplicate {
         approve "refund the duplicate charge" {
@@ -340,10 +342,16 @@ const RETRY_FLAKY_DEPLOY: &str = r#"goal RetryFlakyDeploy -> Success {
   }
   plan {
     let attempt = 1
-    let result = call fake.ci.deploy { service: "api", attempt: attempt }
+    let result = call fake.ci.deploy {
+      service: "api"
+      attempt: attempt
+    }
     while !result.ok && attempt < 5 {
       let attempt = attempt + 1
-      let result = call fake.ci.deploy { service: "api", attempt: attempt }
+      let result = call fake.ci.deploy {
+        service: "api"
+        attempt: attempt
+      }
     }
     approve "announce the successful deploy" {
       call fake.zendesk.comment {

@@ -164,7 +164,94 @@ fn fmt_goal(g: &GoalDecl) -> String {
         s.push_str(&format!("{}}}\n", pad(STEP)));
     }
 
+    if let Some(plan) = &g.plan {
+        s.push_str(&format!("{}plan {{\n", pad(STEP)));
+        s.push_str(&fmt_plan_stmts(&plan.stmts, STEP * 2));
+        s.push_str(&format!("{}}}\n", pad(STEP)));
+    }
+
     s.push('}');
+    s
+}
+
+/// Render a plan body. Tool calls always lay their inputs out one field per line
+/// (a `call` is the unit of work in a workflow — keeping each argument on its own
+/// line keeps diffs and reviews legible); control flow nests by one step.
+fn fmt_plan_stmts(stmts: &[PlanStmt], indent: usize) -> String {
+    let mut s = String::new();
+    for st in stmts {
+        match st {
+            PlanStmt::Let { name, value, .. } => {
+                let rhs = match value {
+                    PlanValue::Call(c) => fmt_plan_call(c, indent),
+                    PlanValue::Expr(e) => fmt_expr(e, indent),
+                };
+                s.push_str(&format!("{}let {} = {}\n", pad(indent), name, rhs));
+            }
+            PlanStmt::Call { call, .. } => {
+                s.push_str(&format!("{}{}\n", pad(indent), fmt_plan_call(call, indent)));
+            }
+            PlanStmt::Approve { summary, body, .. } => {
+                s.push_str(&format!(
+                    "{}approve \"{}\" {{\n",
+                    pad(indent),
+                    escape(summary)
+                ));
+                s.push_str(&fmt_plan_stmts(body, indent + STEP));
+                s.push_str(&format!("{}}}\n", pad(indent)));
+            }
+            PlanStmt::If {
+                cond, then, els, ..
+            } => {
+                s.push_str(&format!(
+                    "{}if {} {{\n",
+                    pad(indent),
+                    fmt_expr(cond, indent)
+                ));
+                s.push_str(&fmt_plan_stmts(then, indent + STEP));
+                if let Some(els) = els {
+                    s.push_str(&format!("{}}} else {{\n", pad(indent)));
+                    s.push_str(&fmt_plan_stmts(els, indent + STEP));
+                }
+                s.push_str(&format!("{}}}\n", pad(indent)));
+            }
+            PlanStmt::For {
+                var, iter, body, ..
+            } => {
+                s.push_str(&format!(
+                    "{}for {} in {} {{\n",
+                    pad(indent),
+                    var,
+                    fmt_expr(iter, indent)
+                ));
+                s.push_str(&fmt_plan_stmts(body, indent + STEP));
+                s.push_str(&format!("{}}}\n", pad(indent)));
+            }
+            PlanStmt::While { cond, body, .. } => {
+                s.push_str(&format!(
+                    "{}while {} {{\n",
+                    pad(indent),
+                    fmt_expr(cond, indent)
+                ));
+                s.push_str(&fmt_plan_stmts(body, indent + STEP));
+                s.push_str(&format!("{}}}\n", pad(indent)));
+            }
+        }
+    }
+    s
+}
+
+/// `call <tool> { ... }` — an empty input renders inline, otherwise one field per line.
+fn fmt_plan_call(c: &PlanCall, indent: usize) -> String {
+    if c.input.is_empty() {
+        return format!("call {} {{}}", c.tool);
+    }
+    let inner = indent + STEP;
+    let mut s = format!("call {} {{\n", c.tool);
+    for (k, e) in &c.input {
+        s.push_str(&format!("{}{}: {}\n", pad(inner), k, fmt_expr(e, inner)));
+    }
+    s.push_str(&format!("{}}}", pad(indent)));
     s
 }
 
@@ -466,6 +553,23 @@ mod tests {
     }
 
     #[test]
+    fn formats_a_plan_goal_without_dropping_the_block() {
+        // Regression: the formatter once rendered the goal head but silently dropped
+        // the entire `plan { … }` body. A messy plan must round-trip to canonical form
+        // with every statement intact.
+        let src = "goal G -> Success {\n  budget { steps: 5 }\n  allow { fake.email.send }\n  plan {\n    for x in items {\n      approve \"ok\" { call fake.email.send { to: x.addr } }\n    }\n  }\n}\n";
+        let out = roundtrips(src);
+        assert!(out.contains("  plan {"), "plan block dropped: {out}");
+        assert!(out.contains("    for x in items {"), "loop dropped: {out}");
+        assert!(out.contains("approve \"ok\" {"), "gate dropped: {out}");
+        assert!(
+            out.contains("call fake.email.send {"),
+            "call dropped: {out}"
+        );
+        assert!(out.contains("        to: x.addr"), "input dropped: {out}");
+    }
+
+    #[test]
     fn formats_sum_types_and_match() {
         let src = "type Parity = Even | Odd\nfn d(p: Parity) -> String {\n  return match p { Even => \"even\" Odd => \"odd\" }\n}\n";
         let out = roundtrips(src);
@@ -492,6 +596,9 @@ mod tests {
             ("main.tach", crate::project::CLEAN_MAIN),
             ("main_test.tach", crate::project::CLEAN_TEST),
             ("goal.tach", crate::project::DEMO_GOAL),
+            // Plan goals must round-trip too — the formatter renders the whole
+            // `plan { … }` block and never drops it.
+            ("plan_demo.tach", crate::project::PLAN_DEMO_CHARGEBACKS),
         ] {
             let out = format_file(name, src).expect("formats");
             assert_eq!(out, src, "{} should be a formatting fixed point", name);

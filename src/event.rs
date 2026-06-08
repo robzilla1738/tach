@@ -123,6 +123,14 @@ impl EventLog {
         })
     }
 
+    /// The sequence number the *next* appended event will carry. Used to precompute
+    /// the id of an event a receipt will reference before that event is emitted (a
+    /// receipt is written before its `receipt.created` event, so the id can't be read
+    /// back from `append`).
+    pub fn peek_seq(&self) -> u64 {
+        self.next_seq
+    }
+
     /// Append one event durably and return it.
     pub fn append(&mut self, kind: &str, payload: Value) -> io::Result<Event> {
         let event = Event::build(&self.run_id, self.next_seq, kind, payload);

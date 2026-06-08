@@ -46,6 +46,9 @@ jobs:
       - name: End-to-end plan language (loop → per-duplicate approval → mid-loop crash → exactly-once)
         run: bash scripts/plan_e2e.sh
 
+      - name: End-to-end user-authored plan goal (scaffold → check → crash → snapshot-beats-live-edit → replay)
+        run: bash scripts/user_plan_e2e.sh
+
       - name: Tach format check (corpus)
         run: |
           for d in corpus/*/; do

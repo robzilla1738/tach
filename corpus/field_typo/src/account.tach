@@ -1,0 +1,8 @@
+type Account = {
+  id: Int
+  balance: Int
+}
+
+fn current_balance(a: Account) -> Int {
+  return a.blance
+}

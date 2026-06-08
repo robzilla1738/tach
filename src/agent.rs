@@ -351,6 +351,67 @@ pub fn race(base: Workspace, max_laps: usize) -> RaceOutcome {
     }
 }
 
+// ----- suite benchmarking -----
+
+/// One case's result within a suite run.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SuiteCase {
+    pub name: String,
+    pub outcome: FixOutcome,
+}
+
+/// Aggregate metrics across a whole suite. `us` (wall-clock) is excluded from
+/// any determinism comparison — it is the one field allowed to vary run to run.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct SuiteMetrics {
+    pub cases: usize,
+    pub green: usize,
+    pub laps: usize,
+    pub patches_applied: usize,
+    pub tests_run: usize,
+    pub regressions: usize,
+    pub diff_chars: usize,
+    pub us: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SuiteOutcome {
+    pub cases: Vec<SuiteCase>,
+    pub totals: SuiteMetrics,
+}
+
+impl SuiteOutcome {
+    pub fn all_green(&self) -> bool {
+        self.totals.cases > 0 && self.totals.green == self.totals.cases
+    }
+}
+
+/// Run the repair loop over every case in a suite, in the given order, and
+/// aggregate the agent-era metrics. Each case is repaired independently on its
+/// own workspace, exactly as `tach fix` would, so the suite measures the loop,
+/// not any cross-case state.
+pub fn run_suite(cases: Vec<(String, Workspace)>, max_laps: usize) -> SuiteOutcome {
+    let mut out_cases = Vec::new();
+    let mut totals = SuiteMetrics::default();
+    for (name, ws) in cases {
+        let outcome = fix(ws, Strategy::Minimal, max_laps);
+        let m = &outcome.metrics;
+        totals.cases += 1;
+        totals.green += usize::from(outcome.is_green());
+        totals.laps += m.laps;
+        totals.patches_applied += m.patches_applied;
+        totals.tests_run += m.tests_run;
+        totals.regressions += m.regressions;
+        totals.diff_chars += m.diff_chars;
+        totals.us += m.us;
+        out_cases.push(SuiteCase { name, outcome });
+    }
+    SuiteOutcome {
+        cases: out_cases,
+        totals,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,5 +484,49 @@ test "expired session rejected" {
         // minimal (annotation fix) has a smaller diff than convert (to_string).
         assert_eq!(out.branches[w].strategy, "minimal");
         assert!(out.branches.iter().all(|b| b.is_green()));
+    }
+
+    fn corpus_cases() -> Vec<(String, Workspace)> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus");
+        crate::project::load_suite(&dir).expect("load corpus")
+    }
+
+    #[test]
+    fn corpus_all_reaches_green() {
+        let cases = corpus_cases();
+        assert!(cases.len() >= 4, "corpus should have several cases");
+        let out = run_suite(cases, 16);
+        for c in &out.cases {
+            assert_eq!(
+                c.outcome.status, "green",
+                "case `{}` did not reach green: {:#?}",
+                c.name, c.outcome.laps
+            );
+            assert_eq!(
+                c.outcome.metrics.regressions, 0,
+                "case `{}` regressed a test",
+                c.name
+            );
+        }
+        assert!(out.all_green());
+        assert_eq!(out.totals.regressions, 0);
+    }
+
+    #[test]
+    fn suite_is_deterministic() {
+        let a = run_suite(corpus_cases(), 16);
+        let b = run_suite(corpus_cases(), 16);
+        // every non-timing field must match byte-for-byte across runs.
+        let files = |o: &SuiteOutcome| {
+            o.cases
+                .iter()
+                .map(|c| (c.name.clone(), c.outcome.final_files.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(files(&a), files(&b));
+        assert_eq!(a.totals.green, b.totals.green);
+        assert_eq!(a.totals.laps, b.totals.laps);
+        assert_eq!(a.totals.patches_applied, b.totals.patches_applied);
+        assert_eq!(a.totals.diff_chars, b.totals.diff_chars);
     }
 }

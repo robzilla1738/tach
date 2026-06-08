@@ -39,6 +39,26 @@ fn collect(base: &Path, dir: &Path, ws: &mut Workspace) -> io::Result<()> {
     Ok(())
 }
 
+/// Load every immediate subdirectory of `dir` as its own project workspace,
+/// returned sorted by case name. Subdirectories with no `.tach` files are
+/// skipped. Used by `tach bench --suite` to run the repair corpus.
+pub fn load_suite(dir: &Path) -> io::Result<Vec<(String, Workspace)>> {
+    let mut cases = Vec::new();
+    let mut entries: Vec<_> = fs::read_dir(dir)?.collect::<Result<_, _>>()?;
+    entries.sort_by_key(|e| e.path());
+    for e in entries {
+        let p = e.path();
+        if p.is_dir() {
+            let ws = load_workspace(&p)?;
+            if !ws.files.is_empty() {
+                let name = e.file_name().to_string_lossy().to_string();
+                cases.push((name, ws));
+            }
+        }
+    }
+    Ok(cases)
+}
+
 /// Load a single file as a one-file workspace (keyed by its file name).
 pub fn load_single(path: &Path) -> io::Result<Workspace> {
     let mut ws = Workspace::new();

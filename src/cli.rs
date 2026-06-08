@@ -471,11 +471,15 @@ fn cmd_replay(_rest: &[String]) -> i32 {
 }
 
 fn cmd_bench(rest: &[String]) -> i32 {
-    let p = parse(rest, &["--max-laps"]);
+    let p = parse(rest, &["--max-laps", "--suite"]);
     let max = p
         .get("--max-laps")
         .and_then(|s| s.parse().ok())
         .unwrap_or(16);
+    if p.has("--suite") {
+        let dir = p.get("--suite").unwrap_or("corpus");
+        return cmd_bench_suite(Path::new(dir), max, p.has("--json"));
+    }
     let root = cwd();
     let ws = match project::load_workspace(&root) {
         Ok(w) => w,
@@ -501,6 +505,80 @@ fn cmd_bench(rest: &[String]) -> i32 {
     row("regressions", format!("{}", m.regressions));
     row("diff-size", format!("{} chars", m.diff_chars));
     0
+}
+
+fn cmd_bench_suite(dir: &Path, max: usize, json: bool) -> i32 {
+    let cases = match project::load_suite(dir) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{} {}: {}", term::bold_red("error:"), dir.display(), e);
+            return 1;
+        }
+    };
+    if cases.is_empty() {
+        println!(
+            "  {} no cases found under {}",
+            term::dim("·"),
+            dir.display()
+        );
+        return 1;
+    }
+    let outcome = agent::run_suite(cases, max);
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&outcome).unwrap_or_default()
+        );
+        return if outcome.all_green() { 0 } else { 1 };
+    }
+    println!("{}", term::bold("Tach bench · repair corpus"));
+    println!(
+        "  {}\n",
+        term::dim("red → green over a suite, not just the demo")
+    );
+    println!(
+        "  {:<22} {:>6}  {:>8}  {:>7}  {:>10}",
+        "case", "status", "patches", "laps", "time"
+    );
+    for c in &outcome.cases {
+        let m = &c.outcome.metrics;
+        let mark = if c.outcome.is_green() {
+            term::green("●")
+        } else {
+            term::bold_red("●")
+        };
+        println!(
+            "  {:<22} {} {:<4}  {:>8}  {:>7}  {:>10}",
+            c.name,
+            mark,
+            c.outcome.status,
+            m.patches_applied,
+            m.laps,
+            render::fmt_duration(m.us),
+        );
+    }
+    let t = &outcome.totals;
+    println!();
+    let lead = if outcome.all_green() {
+        term::green("●")
+    } else {
+        term::bold_red("●")
+    };
+    println!(
+        "  {} {}/{} green · {} patches · {} tests run · {} regressions · {}",
+        lead,
+        t.green,
+        t.cases,
+        t.patches_applied,
+        t.tests_run,
+        t.regressions,
+        render::fmt_duration(t.us),
+    );
+    if outcome.all_green() {
+        0
+    } else {
+        1
+    }
 }
 
 fn cmd_audit(rest: &[String]) -> i32 {

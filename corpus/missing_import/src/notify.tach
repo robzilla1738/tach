@@ -1,0 +1,4 @@
+fn ping() -> Int effects [log.write] {
+  log.info("ping")
+  return 1
+}

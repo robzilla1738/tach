@@ -240,9 +240,9 @@ JSON-value space, since that is what tools consume and receipts store. Two goals
 `ReconcileChargebacks` (a `for` loop over a tool's output with a per-duplicate refund gate) and
 `RetryFlakyDeploy` (a `while` retry loop that converges).
 
-The execution model is **durable re-execution**. `run` and `resume` are the *same* operation:
-walk the plan from the top. The trick that makes loops and long horizons safe is **memoization
-by receipt** —
+The execution model is **durable re-execution**. A run and a resume do the same thing: walk the
+plan from the top. Tool calls are **memoized by their receipts**, which is what keeps loops and
+long horizons safe:
 
 ```
 exec_call(c):
@@ -265,28 +265,28 @@ exec_approve(summary, body):
     granted        -> execute body                        # the gated sub-plan runs now
 ```
 
-Because `call_index`/`gate_index` are assigned in **walk order** (not at parse time), a loop's
-repeated `call` gets a distinct idempotency key per iteration, and — crucially — the assignment
-is **stable across resume**: every call before the frontier is either a memoized receipt or a
-pure deterministic fake tool, so the branches taken and loop counts are identical on every walk,
-hence the same ordinals and the same keys. That is what lets re-execution stand in for a saved
-program counter. `state.json` is never read back for control flow; it is recomputed from the
-receipts and approvals dirs each time.
+`call_index` and `gate_index` are assigned in **walk order**, not at parse time. That matters for
+two reasons: a loop's repeated `call` gets a distinct idempotency key per iteration, and the
+assignment is **stable across resume**. Every call before the frontier is either a memoized
+receipt or a pure deterministic fake tool, so the branches taken and loop counts come out
+identical on every walk, and so do the ordinals and the keys. That stability is what lets
+re-execution stand in for a saved program counter. `state.json` is never read back for control
+flow; it is recomputed from the receipts and approvals dirs each time.
 
-Every crash window is safe by the same argument as the action layer, but without a cursor: the
-receipt write is the atomic commit, and a crash before it means the call simply has no receipt,
-so the resume re-invokes the *deterministic* tool and gets the same output. A crash *after* it
-means the resume finds the receipt and returns it without invoking — so a refund inside a loop,
-crashed right after it commits, is replayed for free and never issued twice. `replay_plan_run`
-is a separate pure re-walk (`ReplayCtx`) that reads the recorded approvals as inputs, re-invokes
-the fake tools, and proves the terminal status and receipt set reproduce — sharing the same
-expression semantics, key formulas, and tools as the durable walk so the two cannot disagree.
+Every crash window is safe by the same argument as the action layer, minus the cursor. The
+receipt write is the atomic commit. Crash before it and the call has no receipt, so the resume
+re-invokes the deterministic tool and gets the same output. Crash after it and the resume finds
+the receipt and returns it without invoking, so a refund inside a loop — crashed the instant
+after it commits — is replayed for free and never issued twice. `replay_plan_run` is a separate
+pure re-walk (`ReplayCtx`): it reads the recorded approvals as inputs, re-invokes the fake tools,
+and proves the terminal status and receipt set reproduce. It shares the durable walk's expression
+semantics, key formulas, and tools, so the two can't disagree on what they decide.
 
-Budget bills tool calls reached per walk (a `for`/`while` that calls tools is bounded by it); a
-generous `PLAN_LOOP_LIMIT` separately bounds a pathological call-free loop. Approval decisions are
-final once made (the `approve`/`deny` command refuses to change a decided gate), and the plan is
-re-derived from the catalog by goal name on every resume — it is part of the binary's identity,
-the same philosophy as the repair leaves a replay re-runs.
+Budget bills tool calls reached per walk, so a `for`/`while` that calls tools is bounded by it; a
+generous `PLAN_LOOP_LIMIT` separately catches a pathological call-free loop. Approval decisions
+are final once made — the `approve`/`deny` command refuses to change a decided gate. And the plan
+is re-derived from the catalog by goal name on every resume, the same way a replay re-runs the
+repair leaves: it is part of the binary's identity, not something the store has to persist.
 
 ## Why an interpreter (for now)
 

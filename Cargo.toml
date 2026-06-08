@@ -2,7 +2,7 @@
 name = "tach"
 version = "0.1.0"
 edition = "2021"
-description = "Tach — the fast language for coding agents. Prompt-to-passing-tests at compiled speed."
+description = "Tach — a typed goal runtime for long-horizon agents. The fastest path from a failing goal to a verified result."
 license = "MIT"
 authors = ["Robert"]
 

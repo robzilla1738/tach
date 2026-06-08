@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tach.dev/schemas/diagnostic.schema.json",
+  "title": "Tach Diagnostic",
+  "description": "A single structured compiler diagnostic. Emitted by `tach check --json`. The agent-facing fields (kind, repair_strategies, preferred_patch) are first-class.",
+  "type": "object",
+  "required": ["code", "severity", "kind", "message", "file", "span"],
+  "additionalProperties": false,
+  "properties": {
+    "code": { "type": "string", "description": "Stable error code, e.g. E0421." },
+    "severity": { "type": "string", "enum": ["error", "warning", "note"] },
+    "kind": { "type": "string", "description": "Machine-stable category, e.g. effect_undeclared." },
+    "message": { "type": "string" },
+    "file": { "type": "string" },
+    "span": { "$ref": "#/$defs/span" },
+    "repair_strategies": { "type": "array", "items": { "type": "string" } },
+    "preferred_patch": {
+      "type": "object",
+      "required": ["file", "span", "replacement", "rationale"],
+      "additionalProperties": false,
+      "properties": {
+        "file": { "type": "string" },
+        "span": { "$ref": "#/$defs/span" },
+        "replacement": { "type": "string" },
+        "rationale": { "type": "string" }
+      }
+    },
+    "notes": { "type": "array", "items": { "type": "string" } }
+  },
+  "$defs": {
+    "span": {
+      "type": "object",
+      "required": ["start", "end"],
+      "additionalProperties": false,
+      "properties": {
+        "start": { "type": "integer", "minimum": 0 },
+        "end": { "type": "integer", "minimum": 0 }
+      },
+      "description": "A half-open byte range [start, end) that doubles as edit coordinates."
+    }
+  }
+}

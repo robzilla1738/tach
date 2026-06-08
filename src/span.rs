@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 /// Spans are byte offsets so they double as edit coordinates: a patch is just a
 /// span plus replacement text. Keeping a single coordinate space for "where the
 /// error is" and "where to edit" is what makes machine repair clean.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Span {
     pub start: usize,
     pub end: usize,

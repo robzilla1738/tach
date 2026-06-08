@@ -111,20 +111,26 @@ pub struct Patch {
 }
 
 /// Knobs controlling which obligations are blocking for a given verification.
+///
+/// The `Default` (all-`false` / all-`None`) is the strictest, unscoped policy: no
+/// new effects, no API-break enforcement, and no goal authority overlay.
+#[derive(Default)]
 pub struct VerifyOpts {
     /// Reject patches that make the program perform an effect it never did before.
     pub allow_new_effects: bool,
     /// Reject patches that change any public function signature.
     pub forbid_api_break: bool,
-}
-
-impl Default for VerifyOpts {
-    fn default() -> Self {
-        VerifyOpts {
-            allow_new_effects: false,
-            forbid_api_break: false,
-        }
-    }
+    /// When set, a goal's authority surface: a new effect is permitted *only* if
+    /// it appears in this set. This is stricter than `allow_new_effects` and is
+    /// how `tach goal run` enforces the `allow { effect ... }` block — a patch
+    /// that would perform an effect the goal was never granted is rejected before
+    /// it touches disk. `None` means "no goal scope; fall back to
+    /// `allow_new_effects`".
+    pub allowed_effects: Option<BTreeSet<String>>,
+    /// When set, the file-write scope a goal granted (`allow { fs.write ... }`).
+    /// Every edited file must match one of these globs, regardless of what the
+    /// patch declares it `touches`. `None` means "no goal scope".
+    pub allowed_writes: Option<Vec<String>>,
 }
 
 /// The pipeline's verdict on a patch.
@@ -151,10 +157,19 @@ impl PatchVerdict {
 pub fn verify_patch(base: &Workspace, patch: &Patch, opts: &VerifyOpts) -> PatchVerdict {
     let mut rejections = Vec::new();
 
-    // 1) Scope: every edit must fall inside the declared `touches` globs.
+    // 1) Scope: every edit must fall inside the declared `touches` globs, and —
+    // when a goal is driving — inside the goal's granted `fs.write` scope too.
     for e in &patch.edits {
         if !patch.touches.iter().any(|g| glob_match(g, &e.file)) {
             rejections.push(format!("touched file outside allowed scope: {}", e.file));
+        }
+        if let Some(writes) = &opts.allowed_writes {
+            if !writes.iter().any(|g| glob_match(g, &e.file)) {
+                rejections.push(format!(
+                    "touched file outside the goal's fs.write authority: {}",
+                    e.file
+                ));
+            }
         }
     }
 
@@ -182,9 +197,25 @@ pub fn verify_patch(base: &Workspace, patch: &Patch, opts: &VerifyOpts) -> Patch
     let before_eff = check::used_effects(&base_prog);
     let after_eff = check::used_effects(&after_prog);
     let new_effects: Vec<String> = after_eff.difference(&before_eff).cloned().collect();
-    if !opts.allow_new_effects {
-        for e in &new_effects {
-            rejections.push(format!("introduced new effect: {}", e));
+    match &opts.allowed_effects {
+        // Goal-scoped: a new effect is fine only if the goal was granted it.
+        Some(granted) => {
+            for e in &new_effects {
+                if !granted.contains(e) {
+                    rejections.push(format!(
+                        "introduced effect outside the goal's authority: {}",
+                        e
+                    ));
+                }
+            }
+        }
+        // Unscoped: fall back to the blanket switch.
+        None => {
+            if !opts.allow_new_effects {
+                for e in &new_effects {
+                    rejections.push(format!("introduced new effect: {}", e));
+                }
+            }
         }
     }
 

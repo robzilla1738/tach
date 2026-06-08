@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tach.dev/schemas/goal.schema.json",
+  "title": "Tach Goal Spec",
+  "description": "The resolved, runtime-facing contract of a `goal` declaration: the budget it may spend, the authority it is granted, and the conditions required for success.",
+  "type": "object",
+  "required": ["name", "budget", "allow", "require"],
+  "additionalProperties": false,
+  "properties": {
+    "name": { "type": "string" },
+    "success": { "type": "string", "description": "The success type written after `->`, if any." },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "steps": { "type": "integer", "minimum": 0, "description": "Hard cap on repair steps (enforced)." },
+        "retries": { "type": "integer", "minimum": 0, "description": "Consecutive rejections tolerated before giving up (enforced)." },
+        "time": { "type": "string", "description": "Wall-clock budget, e.g. 20m (recorded)." },
+        "cost": { "type": "integer", "description": "Cost budget (recorded)." }
+      }
+    },
+    "allow": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The authority surface. A patch that exceeds it is rejected before touching disk.",
+      "properties": {
+        "effects": { "type": "array", "items": { "type": "string" }, "description": "Effects the run may newly perform." },
+        "fs_read": { "type": "array", "items": { "type": "string" } },
+        "fs_write": { "type": "array", "items": { "type": "string" }, "description": "Globs the run may write." },
+        "shell": { "type": "array", "items": { "type": "string" } },
+        "tools": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "require": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Success conditions, e.g. tests.pass, no_new_effects."
+    }
+  }
+}

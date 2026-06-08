@@ -2,34 +2,44 @@
 
 # Tach
 
-**The fast language for coding agents.**
+**A typed goal runtime for long-horizon agents.**
 
-*Prompt-to-passing-tests at compiled speed.*
+*The fastest path from a failing goal to a verified result.*
 
 </div>
 
 ---
 
-Tach is a small compiled language whose **compiler is also an agent harness**. Most
-languages were designed for humans to write and a machine to run. Tach is designed
-for the loop that AI coding agents actually live inside:
+Tach gives an agent's goals a **typed, deterministic, auditable control plane**. A goal
+runs with a budget it can't exceed, an authority it can't escape, checkpoints it can
+resume from, an event history that records everything it did, and a verification pipeline
+that refuses any change that breaks the build, regresses a test, or reaches outside the
+scope it was granted. Use Tach when you want an agent to pursue a goal **without losing
+state, exceeding authority, repeating side effects, or making untraceable changes.**
+
+The foundation is a language whose **compiler is also an agent harness**. Most languages
+were designed for humans to write and a machine to run; Tach is designed for the loop
+agents live inside:
 
 ```
-prompt → patch → compile → test → repair → merge
+goal → budget → authority → diagnostic → typed patch → verify → checkpoint → resume → trace
 ```
 
-The bet is simple: if the compiler emits repairs instead of just complaints, the agent
-driving it can be *trivial*. Every Tach diagnostic carries a machine-applicable
-`preferred_patch` — a byte-span replacement that fixes the problem. So a repair loop
-doesn't need to reason about your code; it reads the fix off the error and applies it
-through a pipeline that proves the change is safe before it touches a file.
+The bet that makes it work: if the compiler emits *repairs* instead of just complaints,
+the agent driving it can be *trivial*. Every Tach diagnostic carries a machine-applicable
+`preferred_patch` — a byte-span replacement that fixes the problem — and `tach fix` can
+drive a broken project from red to green **with no model in the loop**. The goal runtime
+wraps that loop in durability: budgets, checkpoints, resume, replay, and a per-step event
+log.
 
-This repo is a **working compiler and toolchain**: a real lexer, a Pratt parser, a type +
-effect checker that emits **nine patch-carrying diagnostics**, user-defined sum types with
-`match`, a deterministic interpreter, a hermetic test runner, the typed-patch verification
-pipeline, the agent repair loop (with a pluggable coder seam), a canonical formatter, and a
-suite-level benchmark — all in Rust, in a single static binary with **zero language-model
-dependency** for everything that matters.
+This repo is a **working compiler, toolchain, and goal runtime**: a real lexer, a Pratt
+parser, a type + effect checker that emits patch-carrying diagnostics, user-defined sum
+types with `match`, a deterministic interpreter, a hermetic test runner, the typed-patch
+verification pipeline, the agent repair loop (with a pluggable coder seam), the `goal`
+language construct, a durable goal store with append-only event history and
+crash/resume/replay, a canonical formatter, versioned JSON schemas, and a suite-level
+benchmark — all in Rust, in a single static binary with **zero language-model dependency**
+for everything that matters.
 
 ## The 60-second demo
 
@@ -63,6 +73,79 @@ Tach fix · strategy minimal
 
 **Tach fixed the bug in three laps** — with no model in the loop. The intelligence is in
 the compiler's output, not the agent.
+
+## The goal runtime
+
+`tach fix` is the loop. A **goal** is that loop made durable: budgeted, authority-scoped,
+checkpointed after every step, and resumable. A fresh project ships with one:
+
+```tach
+goal FixFailingTests -> Success {
+  budget {
+    steps: 30
+    retries: 3
+  }
+  allow {
+    effect db.read
+    effect db.write
+    effect time.read
+    effect log.write
+    fs.write ["src/**", "tests/**"]
+  }
+  require {
+    tests.pass
+    no_new_effects
+  }
+}
+```
+
+The killer demo: **run it, crash it mid-flight, and resume to green without repeating a
+single patch.**
+
+```console
+$ tach goal run FixFailingTests --crash-after step:2
+● FixFailingTests  run_69c04fc4d55f672e
+  status               running
+  steps                2
+  patches-applied      2
+  ✗ crashed after step 2 (simulated). State is durable.
+  resume with  tach goal resume run_69c04fc4d55f672e
+
+$ tach check        # the working tree is untouched — a crash never half-edits your code
+  ● 1 error(s) ...
+
+$ tach goal resume run_69c04fc4d55f672e
+● FixFailingTests  run_69c04fc4d55f672e
+  status               completed
+  steps                3
+  patches-applied      3       ← the third patch only; the first two were not repeated
+  ✓ updated src/auth.tach
+
+$ tach goal replay run_69c04fc4d55f672e
+  ● replay reproduced the run exactly — 3 step(s), completed
+```
+
+Everything the run did is an immutable line in an append-only log
+(`.tach/goals/<id>/events.jsonl`, schema `tach.event.v1`):
+
+```console
+$ tach goal inspect run_69c04fc4d55f672e
+event history
+   3  diagnostic.emitted     E0421 effect_undeclared
+   4  patch.proposed         fix:effect_undeclared
+   6  patch.applied          fix:effect_undeclared
+   8  checkpoint.written     step 1
+  ...
+  15  run.resumed            from step 2
+  21  checkpoint.written     step 3
+  22  run.completed
+```
+
+The goal's `allow` block is **authority, not documentation**: a patch that would write
+outside `src/**`/`tests/**`, or perform an effect the goal was never granted, is rejected
+by the same verification pipeline that runs the tests — *before* it touches disk. The
+runtime is deterministic and offline: the run id is derived from the goal and its source,
+so `resume`, `replay`, and `inspect` are addressable with no clock and no randomness.
 
 ## Why this is different
 
@@ -205,6 +288,15 @@ The result is a single static binary. Put `target/release/tach` on your `PATH`.
 | `tach replay` | Re-run the last loop and prove it reproduces |
 | `tach bench` | Report agent-loop metrics (time-to-green, laps, …); `--suite <dir>` over a corpus |
 | `tach audit [file]` | Show every function's effect surface |
+| `tach goal run <name>` | Start a durable run (`--crash-after step:N`, `--strategy`, `--dry-run`) |
+| `tach goal list` | List runs in the store |
+| `tach goal inspect <id>` | Show a run's state and event history (`--json`) |
+| `tach goal resume <id>` | Resume a crashed/incomplete run from its last checkpoint |
+| `tach goal replay <id>` | Re-run from base and prove it reproduces |
+| `tach goal cancel <id>` | Cancel a run |
+| `tach doctor` | Hermetic health check of the toolchain + workspace |
+| `tach explain <code>` | Long-form explanation of a diagnostic code |
+| `tach schema [name]` | Print a versioned JSON schema for any machine output |
 
 ## A taste of the language
 
@@ -265,7 +357,9 @@ src/
   interp · runner            deterministic tree-walking runtime + test runner
   patch                      Workspace, typed patches, the verify pipeline, impact analysis
   agent                      the fix loop, the coder seam, race, suite bench, metrics
-  fmt                        the one canonical formatter
+  goal · event · store       the goal contract, append-only event history, durable store
+  runtime                    the durable executor: budgets, checkpoint, resume, replay
+  fmt · schema               the one canonical formatter, versioned JSON schemas
   trace · render · cli       persistence, pretty output, the `tach` binary
 ```
 
@@ -279,31 +373,43 @@ bugs and emits machine-applicable patches (including did-you-mean renames and an
 insert-the-missing-arm fix for non-exhaustive matches); the typed-patch pipeline enforces
 scope, effects, and regressions; the deterministic loop drives the demo to green;
 `tach bench --suite corpus` benchmarks the loop over a suite of broken projects, one per
-diagnostic family. There's a pluggable coder seam (`tach fix --coder fixture`) for the
-cases structured repair can't reach — a logic bug — whose proposals still go through the
-exact same verification pipeline; and `tach fmt` gives the project one canonical,
-idempotent style, gated in CI. **32 passing tests** plus an end-to-end check and a
-formatter check in CI.
+diagnostic family. **The goal runtime is real:** `goal` is a first-class language
+construct with `budget`/`allow`/`require` blocks; `tach goal run` drives the loop under
+those constraints, checkpointing after every step into a durable store with an append-only
+`tach.event.v1` event history; `tach goal resume` recovers a crashed run from its last
+checkpoint **without repeating work**; `tach goal replay` proves a run reproduces; and the
+`allow` block is enforced as real authority by the verification pipeline. There's a
+pluggable coder seam (`tach fix --coder fixture`) whose proposals still go through the
+exact same pipeline; `tach fmt` gives one canonical, idempotent style; `tach schema`
+publishes versioned JSON schemas for every machine output; and `tach doctor` /
+`tach explain` round out the toolchain. **41 passing tests** plus two end-to-end checks
+(red→green, and crash→resume→replay) and a schema-validation step in CI.
 
-**Near-term follow-ups:** multi-file user imports (`import ./module`), and
-comment-preserving formatting (today `tach fmt` skips files with comments rather than
-dropping them).
+**Near-term follow-ups (the roadmap the runtime is built for):** receipts + idempotency
+for side-effecting tools, human-approval interrupts (`Proposed`/`Approved`/`Receipt`),
+typed memory lanes with a context-drift detector, an existing-repo `Tachfile` mode that
+wraps Bun/Cargo/Go test commands, MCP client/server, and a portable goal ABI. The event
+log, durable store, and authority model added here are exactly the substrate those phases
+hang off. Also: multi-file user imports and comment-preserving formatting.
 
 **Deliberately scoped out:** native/LLVM codegen (today it interprets), a borrow checker,
 a package manager, an LSP server, and a *model-backed* coder. The loop already has the
 seam — a `Coder` trait, exercised offline by a deterministic fixture coder — so a real
-model slots in behind a flag later. The core demo and the whole test suite stay
+model slots in behind a flag later, with every model output flowing through the same
+patch/effect/test/authority pipeline. The core demo and the whole test suite stay
 model-free, so everything is fully reproducible offline.
 
 ## Testing
 
 ```console
-$ cargo test          # unit + integration tests
-$ bash scripts/e2e.sh # full new → check → fix → test demo, asserts green
+$ cargo test               # unit + integration tests (41)
+$ bash scripts/e2e.sh      # new → check → fix → test demo, asserts green
+$ bash scripts/goal_e2e.sh # goal run → crash → resume → replay, asserts no repeated work
 ```
 
-CI (`.github/workflows/ci.yml`) runs both on every push. See
-[`CONTRIBUTING.md`](CONTRIBUTING.md) for notes aimed at automated/cloud agents.
+CI (`.github/workflows/ci.yml`) runs all three on every push, plus `tach fmt --check` and
+JSON-schema validation. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for notes aimed at
+automated/cloud agents.
 
 ## License
 

@@ -28,6 +28,115 @@ fn dot(status: &str) -> String {
     }
 }
 
+/// A colored status dot for a goal run's lifecycle status.
+pub fn status_dot(status: &str) -> String {
+    match status {
+        "completed" => term::bold_green("●"),
+        "failed" | "budget_exhausted" => term::bold_red("●"),
+        "cancelled" => term::dim("●"),
+        _ => term::bold_yellow("●"),
+    }
+}
+
+/// The summary block for a goal run: its identity, status, and agent-loop metrics.
+pub fn run_state(s: &crate::store::RunState) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "{} {}  {}\n",
+        status_dot(&s.status),
+        term::bold(&s.goal),
+        term::dim(&s.run_id)
+    ));
+    let row = |k: &str, v: String| format!("  {:<20} {}\n", k, v);
+    out.push_str(&row("status", s.status.clone()));
+    out.push_str(&row("steps", s.step.to_string()));
+    out.push_str(&row("patches-applied", s.patches_applied.to_string()));
+    out.push_str(&row("patches-rejected", s.patches_rejected.to_string()));
+    out.push_str(&row("tests-run", s.tests_run.to_string()));
+    out.push_str(&row("regressions", s.regressions.to_string()));
+    out.push_str(&row("diff-size", format!("{} chars", s.diff_chars)));
+    out.push_str(&row(
+        "tests",
+        format!("{} passed, {} failed", s.tests_passed, s.tests_failed),
+    ));
+    out
+}
+
+/// A compact timeline of a run's event history.
+pub fn events(evs: &[crate::event::Event]) -> String {
+    if evs.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    out.push_str(&format!("\n{}\n", term::bold("event history")));
+    for e in evs {
+        let detail = event_detail(e);
+        out.push_str(&format!(
+            "  {:>4}  {:<22} {}\n",
+            term::dim(&e.seq.to_string()),
+            event_kind_colored(&e.kind),
+            term::dim(&detail)
+        ));
+    }
+    out
+}
+
+fn event_kind_colored(kind: &str) -> String {
+    match kind {
+        "patch.applied" | "run.completed" | "patch.verified" => term::green(kind),
+        "patch.rejected" | "run.failed" | "budget.exhausted" => term::red(kind),
+        "effect.delta_detected" | "run.resumed" => term::yellow(kind),
+        _ => kind.to_string(),
+    }
+}
+
+/// A one-line human gloss of an event's payload — best-effort, never panics.
+fn event_detail(e: &crate::event::Event) -> String {
+    let p = &e.payload;
+    let s = |k: &str| p.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    match e.kind.as_str() {
+        "run.started" => format!("goal {} · strategy {}", s("goal"), s("strategy")),
+        "diagnostic.emitted" => format!("{} {}", s("code"), s("kind")),
+        "patch.proposed" => s("name"),
+        "patch.applied" => s("patch"),
+        "patch.rejected" => {
+            let n = p
+                .get("rejections")
+                .and_then(|r| r.as_array())
+                .map_or(0, |a| a.len());
+            format!("{} ({} reason(s))", s("patch"), n)
+        }
+        "checkpoint.written" => format!(
+            "step {}",
+            p.get("step").and_then(|v| v.as_u64()).unwrap_or(0)
+        ),
+        "test.completed" => format!(
+            "{} passed, {} failed",
+            p.get("passed").and_then(|v| v.as_u64()).unwrap_or(0),
+            p.get("failed").and_then(|v| v.as_u64()).unwrap_or(0)
+        ),
+        "effect.delta_detected" => {
+            let effs = p
+                .get("new_effects")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            effs
+        }
+        "run.failed" => s("reason"),
+        "run.resumed" => format!(
+            "from step {}",
+            p.get("from_step").and_then(|v| v.as_u64()).unwrap_or(0)
+        ),
+        _ => String::new(),
+    }
+}
+
 /// Render a list of diagnostics with source context and the agent-repair hint.
 pub fn diagnostics(diags: &[Diagnostic], ws: &Workspace) -> String {
     let mut out = String::new();

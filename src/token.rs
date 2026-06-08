@@ -19,6 +19,7 @@ pub enum Tok {
     Ensure,
     If,
     Else,
+    Match,
     True,
     False,
     Ok,
@@ -50,6 +51,8 @@ pub enum Tok {
     AndAnd,
     OrOr,
     Bang,
+    Pipe,
+    FatArrow,
 
     /// Statement separator (collapsed runs of newlines, suppressed inside `()`/`[]`).
     Newline,
@@ -76,6 +79,7 @@ impl Tok {
             "ensure" => Tok::Ensure,
             "if" => Tok::If,
             "else" => Tok::Else,
+            "match" => Tok::Match,
             "true" => Tok::True,
             "false" => Tok::False,
             "Ok" => Tok::Ok,
@@ -101,6 +105,7 @@ impl Tok {
             Tok::Ensure => "`ensure`".into(),
             Tok::If => "`if`".into(),
             Tok::Else => "`else`".into(),
+            Tok::Match => "`match`".into(),
             Tok::True => "`true`".into(),
             Tok::False => "`false`".into(),
             Tok::Ok => "`Ok`".into(),
@@ -130,6 +135,8 @@ impl Tok {
             Tok::AndAnd => "`&&`".into(),
             Tok::OrOr => "`||`".into(),
             Tok::Bang => "`!`".into(),
+            Tok::Pipe => "`|`".into(),
+            Tok::FatArrow => "`=>`".into(),
             Tok::Newline => "newline".into(),
             Tok::Eof => "end of file".into(),
         }

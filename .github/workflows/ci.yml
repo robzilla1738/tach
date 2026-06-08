@@ -36,3 +36,9 @@ jobs:
 
       - name: End-to-end demo (red → green)
         run: bash scripts/e2e.sh
+
+      - name: Tach format check (corpus)
+        run: |
+          for d in corpus/*/; do
+            ( cd "$d" && "$GITHUB_WORKSPACE/target/release/tach" fmt --check )
+          done

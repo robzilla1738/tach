@@ -57,11 +57,37 @@ pub fn check_program(program: &Program) -> Vec<Diagnostic> {
             }
         }
 
-        // --- per-function effect + type checks
+        // --- unused imports: a module imported but never referenced by any body
+        // in this file. A lint, not an error.
         for item in &unit.module.items {
-            if let Item::Fn(f) = item {
-                check_fn_effects(f, unit, &sigs, &mut diags);
-                check_fn_types(f, unit, &reg, &sigs, &mut diags);
+            if let Item::Import(im) = item {
+                if !file_modules.contains_key(&im.module) {
+                    diags.push(unused_import_diag(unit, im));
+                }
+            }
+        }
+
+        // --- per-function effect + type checks, plus field-access checks over
+        // every body (functions and tests).
+        for item in &unit.module.items {
+            match item {
+                Item::Fn(f) => {
+                    check_fn_effects(f, unit, &sigs, &mut diags);
+                    check_fn_types(f, unit, &reg, &sigs, &mut diags);
+                    let mut env: HashMap<String, Type> = f
+                        .params
+                        .iter()
+                        .map(|p| (p.name.clone(), type_from_ast(&p.ty)))
+                        .collect();
+                    check_block_fields(&f.body, &mut env, unit, &reg, &sigs, &mut diags);
+                    check_unused_vars(&f.body, unit, &mut diags);
+                }
+                Item::Test(t) => {
+                    let mut env: HashMap<String, Type> = HashMap::new();
+                    check_block_fields(&t.body, &mut env, unit, &reg, &sigs, &mut diags);
+                    check_unused_vars(&t.body, unit, &mut diags);
+                }
+                _ => {}
             }
         }
     }
@@ -293,7 +319,11 @@ fn infer_expr(
         Expr::Float(..) => Type::Float,
         Expr::Str(..) => Type::Str,
         Expr::Bool(..) => Type::Bool,
-        Expr::Ident(name, _) => params.get(name).cloned().unwrap_or(Type::Unknown),
+        Expr::Ident(name, _) => params
+            .get(name)
+            .cloned()
+            .or_else(|| reg.enum_of_variant(name).map(|e| Type::Named(e.clone())))
+            .unwrap_or(Type::Unknown),
         Expr::Unary { op, expr, .. } => match op {
             UnOp::Not => Type::Bool,
             UnOp::Neg => infer_expr(expr, params, sigs, reg),
@@ -358,6 +388,11 @@ fn infer_expr(
                 _ => Type::Unknown,
             }
         }
+        // A `match` has the type of its arm bodies; infer from the first arm.
+        Expr::Match { arms, .. } => arms
+            .first()
+            .map(|a| infer_expr(&a.body, params, sigs, reg))
+            .unwrap_or(Type::Unknown),
     }
 }
 
@@ -375,6 +410,519 @@ fn field_type(rt: &Type, name: &str, reg: &TypeRegistry) -> Type {
             .unwrap_or(Type::Unknown),
         _ => Type::Unknown,
     }
+}
+
+// ----- unknown-field checking -----
+
+/// Walk a block validating every field access against the receiver's type, while
+/// threading a scope of locally-bound variable types so `let`-bound receivers
+/// resolve. We only fire when the receiver resolves to a *known* record type;
+/// `Unknown` (and opaque named types) are skipped, keeping the checker lenient.
+fn check_block_fields(
+    b: &Block,
+    env: &mut HashMap<String, Type>,
+    unit: &Unit,
+    reg: &TypeRegistry,
+    sigs: &HashMap<String, FnSig>,
+    diags: &mut Vec<Diagnostic>,
+) {
+    for s in &b.stmts {
+        match s {
+            Stmt::Let { name, value, .. } => {
+                check_expr_fields(value, env, unit, reg, sigs, diags);
+                let t = infer_expr(value, env, sigs, reg);
+                env.insert(name.clone(), t);
+            }
+            Stmt::Return { value: Some(e), .. } => {
+                check_expr_fields(e, env, unit, reg, sigs, diags)
+            }
+            Stmt::Return { value: None, .. } => {}
+            Stmt::Ensure { cond, els, .. } => {
+                check_expr_fields(cond, env, unit, reg, sigs, diags);
+                if let Some(e) = els {
+                    check_expr_fields(e, env, unit, reg, sigs, diags);
+                }
+            }
+            Stmt::If {
+                cond, then, els, ..
+            } => {
+                check_expr_fields(cond, env, unit, reg, sigs, diags);
+                let mut then_env = env.clone();
+                check_block_fields(then, &mut then_env, unit, reg, sigs, diags);
+                if let Some(eb) = els {
+                    let mut else_env = env.clone();
+                    check_block_fields(eb, &mut else_env, unit, reg, sigs, diags);
+                }
+            }
+            Stmt::Expr(e) => check_expr_fields(e, env, unit, reg, sigs, diags),
+        }
+    }
+}
+
+fn check_expr_fields(
+    e: &Expr,
+    env: &HashMap<String, Type>,
+    unit: &Unit,
+    reg: &TypeRegistry,
+    sigs: &HashMap<String, FnSig>,
+    diags: &mut Vec<Diagnostic>,
+) {
+    match e {
+        Expr::Field {
+            recv,
+            name,
+            name_span,
+            ..
+        } => {
+            check_expr_fields(recv, env, unit, reg, sigs, diags);
+            let rt = infer_expr(recv, env, sigs, reg);
+            if let Some(fields) = record_fields_of(&rt, reg) {
+                if !fields.iter().any(|(fname, _)| fname == name) {
+                    diags.push(unknown_field_diag(unit, &rt, name, *name_span, &fields));
+                }
+            }
+        }
+        Expr::Method { recv, args, .. } => {
+            check_expr_fields(recv, env, unit, reg, sigs, diags);
+            for a in args {
+                check_expr_fields(a, env, unit, reg, sigs, diags);
+            }
+        }
+        Expr::Call { callee, args, .. } => {
+            check_expr_fields(callee, env, unit, reg, sigs, diags);
+            for a in args {
+                check_expr_fields(a, env, unit, reg, sigs, diags);
+            }
+        }
+        Expr::Unary { expr, .. } | Expr::Try { expr, .. } => {
+            check_expr_fields(expr, env, unit, reg, sigs, diags)
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            check_expr_fields(lhs, env, unit, reg, sigs, diags);
+            check_expr_fields(rhs, env, unit, reg, sigs, diags);
+        }
+        Expr::Ok(inner, _) | Expr::Err(inner, _) => {
+            check_expr_fields(inner, env, unit, reg, sigs, diags)
+        }
+        Expr::Record { fields, .. } => {
+            for (_, fe) in fields {
+                check_expr_fields(fe, env, unit, reg, sigs, diags);
+            }
+        }
+        Expr::Match {
+            scrutinee,
+            arms,
+            span,
+        } => {
+            check_expr_fields(scrutinee, env, unit, reg, sigs, diags);
+            for arm in arms {
+                check_expr_fields(&arm.body, env, unit, reg, sigs, diags);
+            }
+            let st = infer_expr(scrutinee, env, sigs, reg);
+            check_match(unit, &st, arms, *span, reg, diags);
+        }
+        Expr::Int(..) | Expr::Float(..) | Expr::Str(..) | Expr::Bool(..) | Expr::Ident(..) => {}
+    }
+}
+
+/// Exhaustiveness + variant checks for a `match` whose scrutinee resolves to a
+/// known enum. Unknown variants get a did-you-mean rename; a non-exhaustive
+/// match gets a patch that inserts the missing arm(s). When the scrutinee type
+/// is anything but a known enum we stay silent (no false positives).
+fn check_match(
+    unit: &Unit,
+    scrutinee_ty: &Type,
+    arms: &[MatchArm],
+    match_span: Span,
+    reg: &TypeRegistry,
+    diags: &mut Vec<Diagnostic>,
+) {
+    let enum_name = match scrutinee_ty {
+        Type::Named(n) if reg.is_enum(n) => n.clone(),
+        _ => return,
+    };
+    let variants = reg.enum_variants(&enum_name).cloned().unwrap_or_default();
+    let mut has_wildcard = false;
+    let mut covered: BTreeSet<String> = BTreeSet::new();
+    for arm in arms {
+        match &arm.pattern {
+            Pattern::Wildcard { .. } => has_wildcard = true,
+            Pattern::Variant { name, span } => {
+                if variants.iter().any(|v| v == name) {
+                    covered.insert(name.clone());
+                } else {
+                    diags.push(unknown_variant_diag(
+                        unit, &enum_name, name, *span, &variants,
+                    ));
+                }
+            }
+        }
+    }
+    if !has_wildcard {
+        let missing: Vec<String> = variants
+            .iter()
+            .filter(|v| !covered.contains(*v))
+            .cloned()
+            .collect();
+        if !missing.is_empty() {
+            diags.push(non_exhaustive_diag(
+                unit, &enum_name, &missing, arms, match_span,
+            ));
+        }
+    }
+}
+
+fn unknown_variant_diag(
+    unit: &Unit,
+    enum_name: &str,
+    variant: &str,
+    name_span: Span,
+    variants: &[String],
+) -> Diagnostic {
+    let mut diag = Diagnostic::error(
+        "E0341",
+        "unknown_variant",
+        format!("enum `{}` has no variant `{}`", enum_name, variant),
+        &unit.source.path,
+        name_span,
+    )
+    .with_note(format!("variants: {}", variants.join(", ")));
+    if let Some(best) = nearest_name(variant, variants) {
+        diag = diag
+            .with_strategies(&["rename_variant"])
+            .with_patch(PreferredPatch {
+                file: unit.source.path.clone(),
+                span: name_span,
+                replacement: best.clone(),
+                rationale: format!("did you mean `{}`?", best),
+            });
+    }
+    diag
+}
+
+fn non_exhaustive_diag(
+    unit: &Unit,
+    enum_name: &str,
+    missing: &[String],
+    arms: &[MatchArm],
+    match_span: Span,
+) -> Diagnostic {
+    let names = missing
+        .iter()
+        .map(|m| format!("`{}`", m))
+        .collect::<Vec<_>>()
+        .join(", ");
+    // Underline just the `match` keyword rather than the whole expression.
+    let head = Span::new(match_span.start, match_span.start + "match".len());
+    let mut diag = Diagnostic::error(
+        "E0340",
+        "non_exhaustive_match",
+        format!(
+            "match on `{}` is not exhaustive; missing {}",
+            enum_name, names
+        ),
+        &unit.source.path,
+        head,
+    )
+    .with_strategies(&["add_arm"])
+    .with_note("a match must cover every variant, or use a `_` catch-all arm");
+    if let Some(patch) = insert_arm_patch(unit, arms, missing) {
+        diag = diag.with_patch(patch);
+    }
+    diag
+}
+
+/// Build a patch that appends an arm for each missing variant after the last
+/// existing arm, reusing the first arm's body as a type-correct placeholder the
+/// author then fills in. Indentation is copied from the first arm's line.
+fn insert_arm_patch(unit: &Unit, arms: &[MatchArm], missing: &[String]) -> Option<PreferredPatch> {
+    let first = arms.first()?;
+    let last = arms.last()?;
+    let text = &unit.source.text;
+    let indent = line_indent(text, first.span.start);
+    let bspan = first.body.span();
+    let body = text.get(bspan.start..bspan.end)?;
+    let mut ins = String::new();
+    for m in missing {
+        ins.push('\n');
+        ins.push_str(&indent);
+        ins.push_str(m);
+        ins.push_str(" => ");
+        ins.push_str(body);
+    }
+    Some(PreferredPatch {
+        file: unit.source.path.clone(),
+        span: Span::at(last.span.end),
+        replacement: ins,
+        rationale: format!(
+            "add the missing arm{}: {} (replace the placeholder body)",
+            if missing.len() > 1 { "s" } else { "" },
+            missing.join(", ")
+        ),
+    })
+}
+
+/// The leading whitespace of the line containing `offset`.
+fn line_indent(text: &str, offset: usize) -> String {
+    let off = offset.min(text.len());
+    let start = text[..off].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    text[start..off]
+        .chars()
+        .take_while(|c| *c == ' ' || *c == '\t')
+        .collect()
+}
+
+/// Nearest candidate name to `name` by edit distance, if close enough to be a
+/// plausible typo. Shared by unknown-field and unknown-variant suggestions.
+fn nearest_name(name: &str, candidates: &[String]) -> Option<String> {
+    let mut best: Option<(usize, &str)> = None;
+    for c in candidates {
+        let d = edit_distance(name, c);
+        if best.map_or(true, |(bd, _)| d < bd) {
+            best = Some((d, c.as_str()));
+        }
+    }
+    match best {
+        Some((d, c)) if d > 0 && (d <= 2 || d * 2 <= name.chars().count()) => Some(c.to_string()),
+        _ => None,
+    }
+}
+
+/// The fields of `t` if it is a known record (named-and-declared, or structural),
+/// else `None`. `Unknown` and opaque named types deliberately return `None`.
+fn record_fields_of(t: &Type, reg: &TypeRegistry) -> Option<Vec<(String, Type)>> {
+    match t {
+        Type::Named(n) => reg.record_fields(n).cloned(),
+        Type::Record(fields) => Some(fields.clone()),
+        _ => None,
+    }
+}
+
+fn unknown_field_diag(
+    unit: &Unit,
+    recv_ty: &Type,
+    field: &str,
+    name_span: Span,
+    fields: &[(String, Type)],
+) -> Diagnostic {
+    let available = fields
+        .iter()
+        .map(|(n, _)| n.clone())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut diag = Diagnostic::error(
+        "E0330",
+        "unknown_field",
+        format!("type `{}` has no field `{}`", recv_ty.display(), field),
+        &unit.source.path,
+        name_span,
+    )
+    .with_note(format!("available fields: {}", available));
+
+    // Only propose a rename when a field is a plausible typo away. Never guess
+    // wildly — an agent would dutifully apply a bad rename.
+    if let Some(best) = nearest_field(field, fields) {
+        diag = diag
+            .with_strategies(&["rename_field"])
+            .with_patch(PreferredPatch {
+                file: unit.source.path.clone(),
+                span: name_span,
+                replacement: best.clone(),
+                rationale: format!("did you mean `{}`?", best),
+            });
+    }
+    diag
+}
+
+/// The closest field name to `field` by edit distance, if one is near enough to
+/// be a plausible typo. Ties resolve to the first field in declared order.
+fn nearest_field(field: &str, fields: &[(String, Type)]) -> Option<String> {
+    let mut best: Option<(usize, &str)> = None;
+    for (name, _) in fields {
+        let d = edit_distance(field, name);
+        if best.map_or(true, |(bd, _)| d < bd) {
+            best = Some((d, name.as_str()));
+        }
+    }
+    match best {
+        Some((d, name)) if d > 0 && (d <= 2 || d * 2 <= field.chars().count()) => {
+            Some(name.to_string())
+        }
+        _ => None,
+    }
+}
+
+/// Levenshtein edit distance over Unicode scalar values.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for i in 1..=a.len() {
+        cur[0] = i;
+        for j in 1..=b.len() {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
+// ----- unused-import / unused-variable lints -----
+
+fn unused_import_diag(unit: &Unit, im: &Import) -> Diagnostic {
+    // Remove the whole line, trailing newline included, so no blank line is left.
+    let text = &unit.source.text;
+    let after = im.span.end.min(text.len());
+    let line_end = text[after..]
+        .find('\n')
+        .map(|i| after + i + 1)
+        .unwrap_or(text.len());
+    Diagnostic::warning(
+        "E0460",
+        "unused_import",
+        format!("module `{}` is imported but never used", im.module),
+        &unit.source.path,
+        im.span,
+    )
+    .with_strategies(&["remove_import"])
+    .with_patch(PreferredPatch {
+        file: unit.source.path.clone(),
+        span: Span::new(im.span.start, line_end),
+        replacement: String::new(),
+        rationale: format!("remove the unused `import {}`", im.module),
+    })
+    .with_note("an unused import widens a file's apparent surface for no reason")
+}
+
+/// Flag `let` bindings never referenced in the body. The repair prefixes `_`
+/// rather than deleting the binding — that silences the lint while preserving any
+/// effect the right-hand side performs, so the patch can never change behavior.
+fn check_unused_vars(b: &Block, unit: &Unit, diags: &mut Vec<Diagnostic>) {
+    let refs = referenced_idents(b);
+    collect_unused_lets(b, &refs, unit, diags);
+}
+
+fn collect_unused_lets(
+    b: &Block,
+    refs: &BTreeSet<String>,
+    unit: &Unit,
+    diags: &mut Vec<Diagnostic>,
+) {
+    for s in &b.stmts {
+        match s {
+            Stmt::Let {
+                name, name_span, ..
+            } => {
+                if !name.starts_with('_') && !refs.contains(name) {
+                    diags.push(unused_variable_diag(unit, name, *name_span));
+                }
+            }
+            Stmt::If { then, els, .. } => {
+                collect_unused_lets(then, refs, unit, diags);
+                if let Some(eb) = els {
+                    collect_unused_lets(eb, refs, unit, diags);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn unused_variable_diag(unit: &Unit, name: &str, name_span: Span) -> Diagnostic {
+    Diagnostic::warning(
+        "E0461",
+        "unused_variable",
+        format!("variable `{}` is never used", name),
+        &unit.source.path,
+        name_span,
+    )
+    .with_strategies(&["underscore_prefix"])
+    .with_patch(PreferredPatch {
+        file: unit.source.path.clone(),
+        span: name_span,
+        replacement: format!("_{}", name),
+        rationale: format!("prefix with `_` to mark `{}` intentionally unused", name),
+    })
+}
+
+/// Every identifier *referenced* anywhere in a block. A `let` binding's own name
+/// is not a reference (it lives in `Stmt::Let.name`, not an `Expr::Ident`), so a
+/// binding that never appears here is genuinely unused.
+fn referenced_idents(b: &Block) -> BTreeSet<String> {
+    fn we(e: &Expr, out: &mut BTreeSet<String>) {
+        match e {
+            Expr::Ident(n, _) => {
+                out.insert(n.clone());
+            }
+            Expr::Unary { expr, .. } | Expr::Try { expr, .. } => we(expr, out),
+            Expr::Binary { lhs, rhs, .. } => {
+                we(lhs, out);
+                we(rhs, out);
+            }
+            Expr::Call { callee, args, .. } => {
+                we(callee, out);
+                for a in args {
+                    we(a, out);
+                }
+            }
+            Expr::Method { recv, args, .. } => {
+                we(recv, out);
+                for a in args {
+                    we(a, out);
+                }
+            }
+            Expr::Field { recv, .. } => we(recv, out),
+            Expr::Ok(e, _) | Expr::Err(e, _) => we(e, out),
+            Expr::Record { fields, .. } => {
+                for (_, fe) in fields {
+                    we(fe, out);
+                }
+            }
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
+                we(scrutinee, out);
+                for arm in arms {
+                    we(&arm.body, out);
+                }
+            }
+            Expr::Int(..) | Expr::Float(..) | Expr::Str(..) | Expr::Bool(..) => {}
+        }
+    }
+    fn ws(s: &Stmt, out: &mut BTreeSet<String>) {
+        match s {
+            Stmt::Let { value, .. } => we(value, out),
+            Stmt::Return { value: Some(e), .. } => we(e, out),
+            Stmt::Return { value: None, .. } => {}
+            Stmt::Ensure { cond, els, .. } => {
+                we(cond, out);
+                if let Some(e) = els {
+                    we(e, out);
+                }
+            }
+            Stmt::If {
+                cond, then, els, ..
+            } => {
+                we(cond, out);
+                for st in &then.stmts {
+                    ws(st, out);
+                }
+                if let Some(eb) = els {
+                    for st in &eb.stmts {
+                        ws(st, out);
+                    }
+                }
+            }
+            Stmt::Expr(e) => we(e, out),
+        }
+    }
+    let mut out = BTreeSet::new();
+    for s in &b.stmts {
+        ws(s, &mut out);
+    }
+    out
 }
 
 // ----- shared body walker -----
@@ -465,6 +1013,14 @@ fn walk_expr(e: &Expr, sigs: &HashMap<String, FnSig>, u: &mut Usage) {
                 walk_expr(fe, sigs, u);
             }
         }
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            walk_expr(scrutinee, sigs, u);
+            for arm in arms {
+                walk_expr(&arm.body, sigs, u);
+            }
+        }
         Expr::Int(..) | Expr::Float(..) | Expr::Str(..) | Expr::Bool(..) | Expr::Ident(..) => {}
     }
 }
@@ -516,6 +1072,14 @@ pub fn called_names_in_block(b: &Block) -> BTreeSet<String> {
             Expr::Record { fields, .. } => {
                 for (_, fe) in fields {
                     we(fe, out);
+                }
+            }
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
+                we(scrutinee, out);
+                for arm in arms {
+                    we(&arm.body, out);
                 }
             }
             _ => {}
@@ -637,5 +1201,186 @@ fn session_summary(s: Session) -> String {
         // the type patch should correct String -> Int
         let ty = errors.iter().find(|d| d.kind == "type_mismatch").unwrap();
         assert_eq!(ty.preferred_patch.as_ref().unwrap().replacement, "Int");
+    }
+
+    const FIELD_TYPO: &str = r#"
+type Session = {
+  token: String
+  user_id: Int
+  expires_at: Int
+}
+
+fn summary(s: Session) -> Int {
+  return s.user_idx
+}
+"#;
+
+    #[test]
+    fn unknown_field_suggests_nearest() {
+        let (prog, _) = Program::parse_sources(vec![SourceFile::new("f.tach", FIELD_TYPO)]);
+        let diags = check_program(&prog);
+        let errors: Vec<_> = diags.iter().filter(|d| d.is_error()).collect();
+        let uf = errors
+            .iter()
+            .find(|d| d.kind == "unknown_field")
+            .expect("an unknown_field error");
+        assert_eq!(uf.code, "E0330");
+        // the patch renames the typo to the nearest real field …
+        let patch = uf.preferred_patch.as_ref().expect("a rename patch");
+        assert_eq!(patch.replacement, "user_id");
+        // … and targets exactly the field-name identifier, nothing more.
+        assert_eq!(&FIELD_TYPO[patch.span.start..patch.span.end], "user_idx");
+    }
+
+    const FIELD_FAR: &str = r#"
+type Session = {
+  token: String
+  user_id: Int
+}
+
+fn summary(s: Session) -> Int {
+  return s.zzzzzzz
+}
+"#;
+
+    #[test]
+    fn unknown_field_does_not_guess_wildly() {
+        let (prog, _) = Program::parse_sources(vec![SourceFile::new("f.tach", FIELD_FAR)]);
+        let diags = check_program(&prog);
+        let uf = diags
+            .iter()
+            .find(|d| d.kind == "unknown_field")
+            .expect("an unknown_field error");
+        assert!(
+            uf.preferred_patch.is_none(),
+            "should not propose a far-fetched rename"
+        );
+    }
+
+    #[test]
+    fn known_record_with_unknown_receiver_is_lenient() {
+        // `row` comes from db.query, whose row type is Unknown — accessing fields
+        // on it must NOT produce a false positive (the demo relies on this).
+        let (prog, _) = Program::parse_sources(vec![SourceFile::new("auth.tach", BROKEN)]);
+        let diags = check_program(&prog);
+        assert!(
+            !diags.iter().any(|d| d.kind == "unknown_field"),
+            "no unknown_field on Unknown-typed receivers: {:?}",
+            diags
+        );
+    }
+
+    const UNUSED_IMPORT: &str = "\nimport math\n\nfn double(x: Int) -> Int {\n  return x\n}\n";
+
+    #[test]
+    fn unused_import_is_removed() {
+        let (prog, _) = Program::parse_sources(vec![SourceFile::new("m.tach", UNUSED_IMPORT)]);
+        let diags = check_program(&prog);
+        let d = diags
+            .iter()
+            .find(|d| d.kind == "unused_import")
+            .expect("an unused_import warning");
+        assert_eq!(d.code, "E0460");
+        assert!(!d.is_error(), "unused_import is a lint, not an error");
+        let patch = d.preferred_patch.as_ref().expect("a remove patch");
+        assert_eq!(patch.replacement, "");
+        // the patch deletes exactly the import line, trailing newline included.
+        assert_eq!(
+            &UNUSED_IMPORT[patch.span.start..patch.span.end],
+            "import math\n"
+        );
+    }
+
+    const UNUSED_VAR: &str = r#"
+fn compute(x: Int) -> Int {
+  let scratch = x
+  return x
+}
+"#;
+
+    #[test]
+    fn unused_variable_gets_underscore() {
+        let (prog, _) = Program::parse_sources(vec![SourceFile::new("m.tach", UNUSED_VAR)]);
+        let diags = check_program(&prog);
+        let d = diags
+            .iter()
+            .find(|d| d.kind == "unused_variable")
+            .expect("an unused_variable warning");
+        assert_eq!(d.code, "E0461");
+        assert!(!d.is_error());
+        let patch = d.preferred_patch.as_ref().expect("an underscore patch");
+        assert_eq!(patch.replacement, "_scratch");
+        assert_eq!(&UNUSED_VAR[patch.span.start..patch.span.end], "scratch");
+    }
+
+    const NON_EXHAUSTIVE: &str = "type Signal = Stop | Go\n\nfn allow(s: Signal) -> Bool {\n  return match s {\n    Stop => false\n  }\n}\n";
+
+    #[test]
+    fn non_exhaustive_match_inserts_missing_arm() {
+        let (prog, _) = Program::parse_sources(vec![SourceFile::new("m.tach", NON_EXHAUSTIVE)]);
+        let diags = check_program(&prog);
+        let d = diags
+            .iter()
+            .find(|d| d.kind == "non_exhaustive_match")
+            .expect("a non_exhaustive_match error");
+        assert_eq!(d.code, "E0340");
+        let patch = d.preferred_patch.as_ref().expect("an add-arm patch");
+        // inserts `Go` with the first arm's body as a placeholder, 4-space indent
+        assert_eq!(patch.replacement, "\n    Go => false");
+        // the insertion point is the end of the last existing arm (`Stop => false`)
+        let at = NON_EXHAUSTIVE.find("=> false").unwrap() + "=> false".len();
+        assert_eq!(patch.span.start, at);
+        assert_eq!(patch.span.end, at);
+    }
+
+    const TYPO_VARIANT: &str = "type Signal = Stop | Go\n\nfn allow(s: Signal) -> Bool {\n  return match s {\n    Stop => false\n    Goo => true\n    _ => false\n  }\n}\n";
+
+    #[test]
+    fn unknown_variant_suggests_nearest() {
+        let (prog, _) = Program::parse_sources(vec![SourceFile::new("m.tach", TYPO_VARIANT)]);
+        let diags = check_program(&prog);
+        let d = diags
+            .iter()
+            .find(|d| d.kind == "unknown_variant")
+            .expect("an unknown_variant error");
+        assert_eq!(d.code, "E0341");
+        let patch = d.preferred_patch.as_ref().expect("a rename patch");
+        assert_eq!(patch.replacement, "Go");
+        assert_eq!(&TYPO_VARIANT[patch.span.start..patch.span.end], "Goo");
+        // a wildcard arm is present, so the match is NOT also non-exhaustive.
+        assert!(!diags.iter().any(|d| d.kind == "non_exhaustive_match"));
+    }
+
+    #[test]
+    fn exhaustive_match_is_clean() {
+        const OK: &str = "type Signal = Stop | Go\n\nfn allow(s: Signal) -> Bool {\n  return match s {\n    Stop => false\n    Go => true\n  }\n}\n";
+        let (prog, _) = Program::parse_sources(vec![SourceFile::new("m.tach", OK)]);
+        let diags = check_program(&prog);
+        assert!(
+            !diags
+                .iter()
+                .any(|d| d.kind == "non_exhaustive_match" || d.kind == "unknown_variant"),
+            "fully-covered match should be clean: {:?}",
+            diags
+        );
+    }
+
+    #[test]
+    fn used_variable_and_underscore_are_not_flagged() {
+        // a referenced binding, and an already-underscored one, are both fine.
+        const OK: &str = r#"
+fn compute(x: Int) -> Int {
+  let y = x
+  let _ignored = x
+  return y
+}
+"#;
+        let (prog, _) = Program::parse_sources(vec![SourceFile::new("m.tach", OK)]);
+        let diags = check_program(&prog);
+        assert!(
+            !diags.iter().any(|d| d.kind == "unused_variable"),
+            "no unused_variable expected: {:?}",
+            diags
+        );
     }
 }

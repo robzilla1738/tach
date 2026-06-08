@@ -149,4 +149,47 @@ test "missing session rejected" {
         assert_eq!(report.total(), 1);
         assert!(report.all_green());
     }
+
+    const SUM_CODE: &str = r#"
+type Parity = Even | Odd
+
+fn classify(n: Int) -> Parity {
+  if n / 2 * 2 == n {
+    return Even
+  }
+  return Odd
+}
+
+fn describe(p: Parity) -> String {
+  return match p {
+    Even => "even"
+    Odd => "odd"
+  }
+}
+"#;
+
+    const SUM_TESTS: &str = r#"
+test "four is even" {
+  ensure classify(4) == Even
+}
+test "seven is odd" {
+  ensure describe(classify(7)) == "odd"
+}
+"#;
+
+    #[test]
+    fn runs_sum_type_and_match_green() {
+        let (prog, diags) = Program::parse_sources(vec![
+            SourceFile::new("parity.tach", SUM_CODE),
+            SourceFile::new("parity_test.tach", SUM_TESTS),
+        ]);
+        assert!(
+            diags.iter().all(|d| !d.is_error()),
+            "unexpected parse errors: {:?}",
+            diags
+        );
+        let report = run_tests(&prog, None);
+        assert_eq!(report.failed, 0, "failures: {:?}", report.outcomes);
+        assert_eq!(report.passed, 2);
+    }
 }

@@ -163,7 +163,28 @@ impl Parser {
         let kw = self.expect(Tok::Type);
         let (name, _) = self.expect_ident();
         self.expect(Tok::Eq);
-        let ty = self.parse_type();
+        // A sum type is a run of bare variant names joined by `|`. We only treat
+        // the RHS as a sum when an identifier is immediately followed by `|`;
+        // otherwise it is a record or a (possibly generic) named type.
+        let ty = if matches!(self.peek(), Tok::Ident(_)) && matches!(self.peek_at(1), Tok::Pipe) {
+            let (first, fsp) = self.expect_ident();
+            let mut variants = vec![Variant {
+                name: first,
+                span: fsp,
+            }];
+            let mut span = fsp;
+            while self.eat(&Tok::Pipe) {
+                let (vn, vsp) = self.expect_ident();
+                span = span.to(vsp);
+                variants.push(Variant {
+                    name: vn,
+                    span: vsp,
+                });
+            }
+            TypeExpr::Sum { variants, span }
+        } else {
+            self.parse_type()
+        };
         let span = kw.to(ty.span());
         TypeDecl { name, ty, span }
     }
@@ -580,6 +601,7 @@ impl Parser {
                         e = Expr::Field {
                             recv: Box::new(e),
                             name,
+                            name_span,
                             span,
                         };
                     }
@@ -674,6 +696,10 @@ impl Parser {
                 self.expect(Tok::RParen);
                 e
             }
+            Tok::Match => {
+                self.bump();
+                self.parse_match(sp)
+            }
             Tok::LBrace if !self.no_record_lit => self.parse_record_lit(None, sp),
             Tok::Ident(name) => {
                 if !self.no_record_lit && matches!(self.peek_at(1), Tok::LBrace) {
@@ -688,6 +714,62 @@ impl Parser {
                 self.error_here("expected an expression");
                 self.bump();
                 Expr::Ident("<error>".into(), sp)
+            }
+        }
+    }
+
+    /// Parse the rest of a `match` after the `match` keyword (whose span is
+    /// `start`): the scrutinee, then `{ pattern => body, ... }`.
+    fn parse_match(&mut self, start: Span) -> Expr {
+        // Suppress record-literal reading of the scrutinee so `match x {` opens
+        // the arm block rather than a record (same trick `if`/`ensure` use).
+        let saved = self.no_record_lit;
+        self.no_record_lit = true;
+        let scrutinee = self.parse_expr();
+        self.no_record_lit = false;
+        self.expect(Tok::LBrace);
+        let mut arms = Vec::new();
+        loop {
+            self.skip_newlines();
+            if matches!(self.peek(), Tok::RBrace | Tok::Eof) {
+                break;
+            }
+            let pat = self.parse_pattern();
+            self.expect(Tok::FatArrow);
+            let body = self.parse_expr();
+            let aspan = pat.span().to(body.span());
+            arms.push(MatchArm {
+                pattern: pat,
+                body,
+                span: aspan,
+            });
+            self.skip_newlines();
+            self.eat(&Tok::Comma);
+        }
+        let rb = self.expect(Tok::RBrace);
+        self.no_record_lit = saved;
+        Expr::Match {
+            scrutinee: Box::new(scrutinee),
+            arms,
+            span: start.to(rb),
+        }
+    }
+
+    fn parse_pattern(&mut self) -> Pattern {
+        let sp = self.peek_span();
+        match self.peek().clone() {
+            Tok::Ident(name) if name == "_" => {
+                self.bump();
+                Pattern::Wildcard { span: sp }
+            }
+            Tok::Ident(name) => {
+                self.bump();
+                Pattern::Variant { name, span: sp }
+            }
+            _ => {
+                self.error_here("expected a pattern (a variant name or `_`)");
+                self.bump();
+                Pattern::Wildcard { span: sp }
             }
         }
     }
@@ -757,6 +839,54 @@ test "loads" {
   ensure load_session("x").is_err()
 }
 "#;
+
+    const SUM: &str = r#"
+type Parity = Even | Odd
+
+fn describe(p: Parity) -> String {
+  return match p {
+    Even => "even"
+    Odd => "odd"
+  }
+}
+"#;
+
+    #[test]
+    fn parses_sum_type_and_match() {
+        let (module, diags) = parse("sum.tach", SUM);
+        let errs: Vec<_> = diags.iter().filter(|d| d.is_error()).collect();
+        assert!(errs.is_empty(), "unexpected parse errors: {:?}", errs);
+
+        // the sum type declares two payload-less variants
+        let parity = module.items.iter().find_map(|i| match i {
+            Item::Type(t) if t.name == "Parity" => Some(t),
+            _ => None,
+        });
+        match parity.map(|t| &t.ty) {
+            Some(TypeExpr::Sum { variants, .. }) => {
+                let names: Vec<_> = variants.iter().map(|v| v.name.as_str()).collect();
+                assert_eq!(names, vec!["Even", "Odd"]);
+            }
+            other => panic!("expected a sum type, got {:?}", other),
+        }
+
+        // the body is a single `return match ...` with two arms
+        let f = module.items.iter().find_map(|i| match i {
+            Item::Fn(f) if f.name == "describe" => Some(f),
+            _ => None,
+        });
+        let f = f.expect("describe fn parsed");
+        match &f.body.stmts[0] {
+            Stmt::Return {
+                value: Some(Expr::Match { arms, .. }),
+                ..
+            } => {
+                assert_eq!(arms.len(), 2);
+                assert!(matches!(arms[0].pattern, Pattern::Variant { .. }));
+            }
+            other => panic!("expected `return match`, got {:?}", other),
+        }
+    }
 
     #[test]
     fn parses_sample_cleanly() {

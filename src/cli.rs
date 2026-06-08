@@ -11,7 +11,7 @@ use crate::patch::Workspace;
 use crate::program::Program;
 use crate::runner::run_tests;
 use crate::trace::{self, TraceFile};
-use crate::{builtins, project, render, term};
+use crate::{builtins, fmt, project, render, term};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -26,6 +26,7 @@ pub fn run(args: Vec<String>) -> i32 {
         "run" => cmd_run(&rest),
         "test" => cmd_test(&rest),
         "fix" => cmd_fix(&rest),
+        "fmt" => cmd_fmt(&rest),
         "race" => cmd_race(&rest),
         "trace" => cmd_trace(&rest),
         "replay" => cmd_replay(&rest),
@@ -296,7 +297,7 @@ fn cmd_test(rest: &[String]) -> i32 {
 }
 
 fn cmd_fix(rest: &[String]) -> i32 {
-    let p = parse(rest, &["--max-laps", "--strategy"]);
+    let p = parse(rest, &["--max-laps", "--strategy", "--coder", "--fixtures"]);
     let dry = p.has("--dry-run");
     let max = p
         .get("--max-laps")
@@ -319,7 +320,34 @@ fn cmd_fix(rest: &[String]) -> i32 {
         println!("  {} no .tach files found here", term::dim("·"));
         return 1;
     }
-    let outcome = agent::fix(ws, strat, max);
+    // An optional coder engages only where deterministic repair gives up. The
+    // only coder built in is the offline `fixture` one, which replays typed
+    // patches from a JSON file through the same verification pipeline.
+    let coder = match p.get("--coder") {
+        Some("fixture") | None if p.has("--coder") => {
+            let path = p.get("--fixtures").unwrap_or(".tach/fixtures.json");
+            match load_fixture_coder(Path::new(path)) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    eprintln!("{} {}: {}", term::bold_red("error:"), path, e);
+                    return 1;
+                }
+            }
+        }
+        Some(other) => {
+            eprintln!(
+                "{} unknown coder `{}` (only `fixture` is built in)",
+                term::bold_red("error:"),
+                other
+            );
+            return 1;
+        }
+        None => None,
+    };
+    let outcome = match &coder {
+        Some(c) => agent::fix_with_coder(ws, strat, max, Some(c as &dyn agent::Coder)),
+        None => agent::fix(ws, strat, max),
+    };
     print!("{}", render::fix(&outcome));
     let _ = trace::save(&root, &TraceFile::Fix(outcome.clone()));
 
@@ -338,6 +366,105 @@ fn cmd_fix(rest: &[String]) -> i32 {
         0
     } else {
         1
+    }
+}
+
+/// `tach fmt [file] [--check]` — render every `.tach` file to its one canonical
+/// form. With `--check` it writes nothing and exits non-zero if anything would
+/// change (the CI gate). Files that don't parse are left untouched.
+fn cmd_fmt(rest: &[String]) -> i32 {
+    let p = parse(rest, &[]);
+    let check = p.has("--check");
+
+    let files: Vec<(String, PathBuf, String)> =
+        if let Some(arg) = p.pos.iter().find(|s| s.ends_with(".tach")) {
+            let path = PathBuf::from(arg);
+            match std::fs::read_to_string(&path) {
+                Ok(t) => vec![(arg.clone(), path, t)],
+                Err(e) => {
+                    eprintln!("{} {}: {}", term::bold_red("error:"), arg, e);
+                    return 1;
+                }
+            }
+        } else {
+            let root = cwd();
+            match project::load_workspace(&root) {
+                Ok(ws) => ws
+                    .files
+                    .into_iter()
+                    .map(|(rel, t)| (rel.clone(), root.join(&rel), t))
+                    .collect(),
+                Err(e) => {
+                    eprintln!("{} {}", term::bold_red("error:"), e);
+                    return 1;
+                }
+            }
+        };
+
+    if files.is_empty() {
+        println!("  {} no .tach files found here", term::dim("·"));
+        return 0;
+    }
+
+    let mut changed: Vec<String> = Vec::new();
+    let mut skipped: Vec<(String, &'static str)> = Vec::new();
+    for (disp, abs, text) in &files {
+        match fmt::format_file(disp, text) {
+            Err(fmt::Skip::ParseError) => {
+                skipped.push((disp.clone(), "does not parse — run `tach check`"))
+            }
+            Err(fmt::Skip::HasComments) => {
+                skipped.push((disp.clone(), "has comments (not yet preserved)"))
+            }
+            Ok(formatted) if &formatted != text => {
+                changed.push(disp.clone());
+                if !check {
+                    if let Err(e) = std::fs::write(abs, &formatted) {
+                        eprintln!("{} {}: {}", term::bold_red("write error:"), disp, e);
+                        return 1;
+                    }
+                }
+            }
+            Ok(_) => {}
+        }
+    }
+
+    for (s, why) in &skipped {
+        println!("  {} skipped {} ({})", term::dim("·"), s, why);
+    }
+
+    if check {
+        if changed.is_empty() {
+            println!(
+                "  {} all {} file(s) are formatted",
+                term::bold_green("●"),
+                files.len()
+            );
+            0
+        } else {
+            for f in &changed {
+                println!("  {} {}", term::bold_yellow("✗"), f);
+            }
+            println!(
+                "  {} {} file(s) need formatting — run `tach fmt`",
+                term::bold_red("●"),
+                changed.len()
+            );
+            1
+        }
+    } else {
+        if changed.is_empty() {
+            println!(
+                "  {} already formatted ({} file(s))",
+                term::bold_green("●"),
+                files.len()
+            );
+        } else {
+            for f in &changed {
+                println!("  {} formatted {}", term::green("✓"), f);
+            }
+        }
+        0
     }
 }
 
@@ -471,11 +598,15 @@ fn cmd_replay(_rest: &[String]) -> i32 {
 }
 
 fn cmd_bench(rest: &[String]) -> i32 {
-    let p = parse(rest, &["--max-laps"]);
+    let p = parse(rest, &["--max-laps", "--suite"]);
     let max = p
         .get("--max-laps")
         .and_then(|s| s.parse().ok())
         .unwrap_or(16);
+    if p.has("--suite") {
+        let dir = p.get("--suite").unwrap_or("corpus");
+        return cmd_bench_suite(Path::new(dir), max, p.has("--json"));
+    }
     let root = cwd();
     let ws = match project::load_workspace(&root) {
         Ok(w) => w,
@@ -501,6 +632,91 @@ fn cmd_bench(rest: &[String]) -> i32 {
     row("regressions", format!("{}", m.regressions));
     row("diff-size", format!("{} chars", m.diff_chars));
     0
+}
+
+/// Build a deterministic fixture coder from a JSON file of typed patches. The
+/// schema is a plain array of `Patch` objects (the same shape `tach check
+/// --json` emits per diagnostic), so a model — or a human — can author a fix
+/// table the offline loop replays through the verification pipeline.
+fn load_fixture_coder(path: &Path) -> Result<agent::FixtureCoder, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let patches: Vec<crate::patch::Patch> =
+        serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    Ok(agent::FixtureCoder::new(patches))
+}
+
+fn cmd_bench_suite(dir: &Path, max: usize, json: bool) -> i32 {
+    let cases = match project::load_suite(dir) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{} {}: {}", term::bold_red("error:"), dir.display(), e);
+            return 1;
+        }
+    };
+    if cases.is_empty() {
+        println!(
+            "  {} no cases found under {}",
+            term::dim("·"),
+            dir.display()
+        );
+        return 1;
+    }
+    let outcome = agent::run_suite(cases, max);
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&outcome).unwrap_or_default()
+        );
+        return if outcome.all_green() { 0 } else { 1 };
+    }
+    println!("{}", term::bold("Tach bench · repair corpus"));
+    println!(
+        "  {}\n",
+        term::dim("red → green over a suite, not just the demo")
+    );
+    println!(
+        "  {:<22} {:>6}  {:>8}  {:>7}  {:>10}",
+        "case", "status", "patches", "laps", "time"
+    );
+    for c in &outcome.cases {
+        let m = &c.outcome.metrics;
+        let mark = if c.outcome.is_green() {
+            term::green("●")
+        } else {
+            term::bold_red("●")
+        };
+        println!(
+            "  {:<22} {} {:<4}  {:>8}  {:>7}  {:>10}",
+            c.name,
+            mark,
+            c.outcome.status,
+            m.patches_applied,
+            m.laps,
+            render::fmt_duration(m.us),
+        );
+    }
+    let t = &outcome.totals;
+    println!();
+    let lead = if outcome.all_green() {
+        term::green("●")
+    } else {
+        term::bold_red("●")
+    };
+    println!(
+        "  {} {}/{} green · {} patches · {} tests run · {} regressions · {}",
+        lead,
+        t.green,
+        t.cases,
+        t.patches_applied,
+        t.tests_run,
+        t.regressions,
+        render::fmt_duration(t.us),
+    );
+    if outcome.all_green() {
+        0
+    } else {
+        1
+    }
 }
 
 fn cmd_audit(rest: &[String]) -> i32 {
@@ -580,8 +796,9 @@ fn print_help() {
     );
     cmd(
         "fix",
-        "run the agentic repair loop to green (--strategy, --dry-run)",
+        "run the agentic repair loop to green (--strategy, --dry-run, --coder fixture)",
     );
+    cmd("fmt [file]", "format to the one canonical style (--check)");
     cmd(
         "race",
         "race repair strategies in isolation; --apply the winner",
@@ -590,7 +807,7 @@ fn print_help() {
     cmd("replay", "re-run the last loop and prove it reproduces");
     cmd(
         "bench",
-        "report agent-loop metrics (time-to-green, laps, ...)",
+        "report agent-loop metrics (time-to-green, laps, ...); --suite <dir>",
     );
     cmd("audit [file]", "show every function's effect surface");
     cmd("version", "print the version");

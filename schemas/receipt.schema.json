@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tach.dev/schemas/receipt.schema.json",
+  "title": "Tach Receipt",
+  "description": "Durable proof that an effectful action ran (receipts/<id>.json). Keyed by an idempotency key derived from (run_id, action_id, tool, input); re-entering the same action on resume finds this receipt and skips the tool call, so a side effect happens exactly once.",
+  "type": "object",
+  "required": ["receipt_id", "idempotency_key", "action_id", "tool", "input", "output"],
+  "additionalProperties": false,
+  "properties": {
+    "receipt_id": { "type": "string", "description": "Deterministic receipt id, e.g. rcpt_235edb8551e6." },
+    "idempotency_key": { "type": "string", "description": "Stable key for the effect; the same key is never executed twice within a run." },
+    "action_id": { "type": "string" },
+    "tool": { "type": "string", "description": "The fake tool invoked, e.g. fake.stripe.refund." },
+    "input": { "description": "The exact input passed to the tool." },
+    "output": { "description": "The tool's recorded result — the proof of the effect." }
+  }
+}

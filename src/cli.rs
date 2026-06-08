@@ -12,7 +12,7 @@ use crate::patch::Workspace;
 use crate::program::Program;
 use crate::runner::run_tests;
 use crate::trace::{self, TraceFile};
-use crate::{builtins, event, fmt, project, render, runtime, schema, store, term};
+use crate::{action, builtins, event, fmt, project, render, runtime, schema, store, term};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -783,6 +783,11 @@ fn cmd_goal(rest: &[String]) -> i32 {
         "resume" => cmd_goal_resume(&rest),
         "replay" => cmd_goal_replay(&rest),
         "cancel" => cmd_goal_cancel(&rest),
+        "approvals" => cmd_goal_approvals(&rest),
+        "approve" => cmd_goal_approve(&rest),
+        "deny" => cmd_goal_deny(&rest),
+        "receipts" => cmd_goal_receipts(&rest),
+        "receipt" => cmd_goal_receipt(&rest),
         "" => cmd_goal_overview(),
         other => {
             eprintln!(
@@ -807,25 +812,41 @@ fn cmd_goal_overview() -> i32 {
     };
     let (prog, _) = ws.program();
     let goals = goal::all_goals(&prog);
-    if goals.is_empty() {
-        println!("  {} no goals declared in this workspace", term::dim("·"));
-        print_goal_help();
-        return 0;
+    if !goals.is_empty() {
+        println!("{}", term::bold("goals in this workspace"));
+        println!();
+        for g in goals {
+            let spec = GoalSpec::from_decl(g);
+            println!(
+                "  {}  {}",
+                term::bold(&g.name),
+                term::dim(&format!(
+                    "budget {} steps · {} effect(s) · require [{}]",
+                    spec.step_budget(),
+                    spec.allow.effects.len(),
+                    spec.require.join(", ")
+                ))
+            );
+        }
+        println!();
     }
-    println!("{}", term::bold("goals in this workspace"));
+
+    // Built-in business goals run a fixed action plan and need no workspace.
+    println!("{}", term::bold("built-in action goals"));
     println!();
-    for g in goals {
-        let spec = GoalSpec::from_decl(g);
-        println!(
-            "  {}  {}",
-            term::bold(&g.name),
-            term::dim(&format!(
-                "budget {} steps · {} effect(s) · require [{}]",
-                spec.step_budget(),
-                spec.allow.effects.len(),
-                spec.require.join(", ")
-            ))
-        );
+    for name in action::builtin_action_goal_names() {
+        if let Some((spec, plan)) = action::builtin_action_goal(name) {
+            println!(
+                "  {}  {}",
+                term::bold(name),
+                term::dim(&format!(
+                    "{} action(s) · {} tool(s) · budget {} steps",
+                    plan.steps.len(),
+                    spec.allow.tools.len(),
+                    spec.step_budget()
+                ))
+            );
+        }
     }
     println!();
     println!("  run one with  {}", term::bold("tach goal run <name>"));
@@ -855,6 +876,28 @@ fn cmd_goal_run(rest: &[String]) -> i32 {
     let crash_after = parse_crash_after(&p);
     let dry = p.has("--dry-run");
     let root = cwd();
+
+    // A built-in business goal runs a fixed action plan — it needs no workspace.
+    if let Some((spec, plan)) = action::builtin_action_goal(&name) {
+        let fp = store::fingerprint(&spec.name, &std::collections::BTreeMap::new());
+        let prior = store::runs_for_fingerprint(&root, &fp);
+        if !prior.is_empty() {
+            println!(
+                "  {} {} prior run(s) of this goal exist; starting a new one (histories are kept)",
+                term::dim("·"),
+                prior.len()
+            );
+        }
+        let crash = crash_after.map(runtime::ActionCrash::Step);
+        let result = match runtime::start_action_run(&root, spec, plan, crash) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("{} {}", term::bold_red("error:"), e);
+                return 1;
+            }
+        };
+        return finish_run(&root, result, dry);
+    }
 
     let ws = match project::load_workspace(&root) {
         Ok(w) => w,
@@ -946,7 +989,7 @@ fn cmd_goal_resume(rest: &[String]) -> i32 {
             return 1;
         }
     };
-    if matches!(state.status.as_str(), "completed" | "cancelled") {
+    if matches!(state.status.as_str(), "completed" | "cancelled" | "denied") {
         println!(
             "  {} run `{}` is already {} — nothing to resume",
             term::dim("·"),
@@ -983,6 +1026,31 @@ fn finish_run(root: &Path, result: runtime::RunResult, dry: bool) -> i32 {
             term::bold(&format!("tach goal resume {}", st.run_id))
         );
         return CRASH_EXIT;
+    }
+
+    if result.paused {
+        println!(
+            "\n  {} awaiting approval — review with {}",
+            term::bold_yellow("⏸"),
+            term::bold(&format!("tach goal approvals {}", st.run_id))
+        );
+        return 0;
+    }
+
+    // An action goal has no workspace to write back; it proves its work with receipts.
+    if st.kind == "action" {
+        return match st.status.as_str() {
+            "completed" => {
+                println!(
+                    "\n  {} goal completed — {} receipt(s). See {}",
+                    term::green("✓"),
+                    st.receipts_created,
+                    term::bold(&format!("tach goal receipts {}", st.run_id))
+                );
+                0
+            }
+            _ => 1,
+        };
     }
 
     match st.status.as_str() {
@@ -1145,6 +1213,206 @@ fn cmd_goal_cancel(rest: &[String]) -> i32 {
     }
 }
 
+// ----- action layer: approvals & receipts -----
+
+/// Read a `<run-id> <id>` pair of positionals, or print a usage error.
+fn two_positionals<'a>(p: &'a Parsed, usage: &str) -> Option<(&'a str, &'a str)> {
+    match (p.pos.first(), p.pos.get(1)) {
+        (Some(a), Some(b)) => Some((a.as_str(), b.as_str())),
+        _ => {
+            eprintln!("{} usage: {}", term::bold_red("error:"), usage);
+            None
+        }
+    }
+}
+
+fn cmd_goal_approvals(rest: &[String]) -> i32 {
+    let p = parse(rest, &[]);
+    let root = cwd();
+    let id = match p.pos.first() {
+        Some(i) => i.clone(),
+        None => {
+            eprintln!(
+                "{} usage: tach goal approvals <run-id>",
+                term::bold_red("error:")
+            );
+            return 2;
+        }
+    };
+    if store::load_state(&root, &id).is_err() {
+        eprintln!(
+            "{} no run `{}` in the goal store",
+            term::bold_red("error:"),
+            id
+        );
+        return 1;
+    }
+    let items = store::list_approvals(&root, &id);
+    if items.is_empty() {
+        println!(
+            "  {} no approvals recorded for run `{}`",
+            term::dim("·"),
+            id
+        );
+        return 0;
+    }
+    print!("{}", render::approvals(&items));
+    0
+}
+
+fn cmd_goal_approve(rest: &[String]) -> i32 {
+    decide_approval(rest, "granted")
+}
+
+fn cmd_goal_deny(rest: &[String]) -> i32 {
+    decide_approval(rest, "denied")
+}
+
+/// Shared body for `approve`/`deny`: flip the approval file to a terminal status and
+/// append the decision event. The decision is recorded once, here, by the human's
+/// command — the runtime never re-emits it on resume. An already-decided approval is
+/// terminal: a second decision is refused.
+fn decide_approval(rest: &[String], decision: &str) -> i32 {
+    let p = parse(rest, &["--note", "--reason"]);
+    let granting = decision == "granted";
+    let usage = if granting {
+        "tach goal approve <run-id> <approval-id> [--note ...]"
+    } else {
+        "tach goal deny <run-id> <approval-id> [--reason ...]"
+    };
+    let (id, apr_id) = match two_positionals(&p, usage) {
+        Some(v) => v,
+        None => return 2,
+    };
+    let root = cwd();
+    let mut approval = match store::load_approval(&root, id, apr_id) {
+        Ok(a) => a,
+        Err(_) => {
+            eprintln!(
+                "{} no approval `{}` for run `{}`",
+                term::bold_red("error:"),
+                apr_id,
+                id
+            );
+            return 1;
+        }
+    };
+    if approval.status != "pending" {
+        eprintln!(
+            "{} approval `{}` is already {} — decisions are final",
+            term::bold_red("error:"),
+            apr_id,
+            approval.status
+        );
+        return 1;
+    }
+    approval.status = decision.to_string();
+    approval.note = p
+        .get("--note")
+        .or_else(|| p.get("--reason"))
+        .map(str::to_string);
+    if let Err(e) = store::save_approval(&root, id, &approval) {
+        eprintln!("{} {}", term::bold_red("error:"), e);
+        return 1;
+    }
+    let mut log = match event::EventLog::resume(&store::events_path(&root, id), id) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("{} {}", term::bold_red("error:"), e);
+            return 1;
+        }
+    };
+    let kind = if granting {
+        event::kind::APPROVAL_GRANTED
+    } else {
+        event::kind::APPROVAL_DENIED
+    };
+    let _ = log.append(
+        kind,
+        serde_json::json!({
+            "approval_id": approval.id,
+            "action": approval.action_id,
+            "tool": approval.tool,
+            "note": approval.note,
+        }),
+    );
+    if granting {
+        println!(
+            "  {} approved `{}` — resume with {}",
+            term::green("✓"),
+            apr_id,
+            term::bold(&format!("tach goal resume {}", id))
+        );
+    } else {
+        println!(
+            "  {} denied `{}` — the action will be skipped on resume",
+            term::bold_yellow("✗"),
+            apr_id
+        );
+    }
+    0
+}
+
+fn cmd_goal_receipts(rest: &[String]) -> i32 {
+    let p = parse(rest, &[]);
+    let root = cwd();
+    let id = match p.pos.first() {
+        Some(i) => i.clone(),
+        None => {
+            eprintln!(
+                "{} usage: tach goal receipts <run-id>",
+                term::bold_red("error:")
+            );
+            return 2;
+        }
+    };
+    if store::load_state(&root, &id).is_err() {
+        eprintln!(
+            "{} no run `{}` in the goal store",
+            term::bold_red("error:"),
+            id
+        );
+        return 1;
+    }
+    let items = store::list_receipts(&root, &id);
+    if items.is_empty() {
+        println!("  {} no receipts recorded for run `{}`", term::dim("·"), id);
+        return 0;
+    }
+    print!("{}", render::receipts(&items));
+    0
+}
+
+fn cmd_goal_receipt(rest: &[String]) -> i32 {
+    let p = parse(rest, &[]);
+    let (id, rid) = match two_positionals(&p, "tach goal receipt <run-id> <receipt-id> [--json]") {
+        Some(v) => v,
+        None => return 2,
+    };
+    let root = cwd();
+    let receipt = match store::load_receipt(&root, id, rid) {
+        Ok(r) => r,
+        Err(_) => {
+            eprintln!(
+                "{} no receipt `{}` for run `{}`",
+                term::bold_red("error:"),
+                rid,
+                id
+            );
+            return 1;
+        }
+    };
+    if p.has("--json") {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&receipt).unwrap_or_default()
+        );
+    } else {
+        print!("{}", render::receipt(&receipt));
+    }
+    0
+}
+
 fn strategy_from_flag(flag: Option<&str>) -> Strategy {
     match flag {
         Some("convert") => Strategy::Convert,
@@ -1176,6 +1444,15 @@ fn print_goal_help() {
         "re-run from base and prove it reproduces",
     );
     cmd("goal cancel <id>", "cancel a run");
+    println!();
+    cmd("goal approvals <id>", "list a run's approval gates");
+    cmd(
+        "goal approve <id> <apr>",
+        "grant a pending approval (--note)",
+    );
+    cmd("goal deny <id> <apr>", "deny a pending approval (--reason)");
+    cmd("goal receipts <id>", "list a run's effect receipts");
+    cmd("goal receipt <id> <rcpt>", "show one receipt (--json)");
 }
 
 // ----- doctor / explain / schema -----

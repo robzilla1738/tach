@@ -66,7 +66,7 @@ fn run_core(program: &Program, keep: impl Fn(&str) -> bool) -> TestReport {
 
 /// Run every test whose name contains `filter` (or all tests if `None`).
 pub fn run_tests(program: &Program, filter: Option<&str>) -> TestReport {
-    run_core(program, |n| filter.map_or(true, |f| n.contains(f)))
+    run_core(program, |n| filter.is_none_or(|f| n.contains(f)))
 }
 
 /// Run only the named tests — used by the patch pipeline to run just the tests a

@@ -731,7 +731,7 @@ fn nearest_name(name: &str, candidates: &[String]) -> Option<String> {
     let mut best: Option<(usize, &str)> = None;
     for c in candidates {
         let d = edit_distance(name, c);
-        if best.map_or(true, |(bd, _)| d < bd) {
+        if best.is_none_or(|(bd, _)| d < bd) {
             best = Some((d, c.as_str()));
         }
     }
@@ -793,7 +793,7 @@ fn nearest_field(field: &str, fields: &[(String, Type)]) -> Option<String> {
     let mut best: Option<(usize, &str)> = None;
     for (name, _) in fields {
         let d = edit_distance(field, name);
-        if best.map_or(true, |(bd, _)| d < bd) {
+        if best.is_none_or(|(bd, _)| d < bd) {
             best = Some((d, name.as_str()));
         }
     }

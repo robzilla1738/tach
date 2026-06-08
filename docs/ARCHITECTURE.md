@@ -45,8 +45,9 @@ byte-for-byte.
 | `agent` | the `fix` loop, the optional `Coder` seam (default off), speculative `race`, the suite benchmark, the agent-era `Metrics`, and the shared repair leaves (`collect_problems`, `pick_candidate`, `build_patch`) the goal runtime reuses |
 | `goal` | the resolved `GoalSpec` (budget, authority, success conditions), decoupled from spans so it serializes into the store |
 | `event` | the `tach.event.v1` envelope and the append-only JSONL `EventLog` |
-| `store` | the durable goal store: `goal.json`, `state.json`, `events.jsonl`, `checkpoints/`, the deterministic source `fingerprint`, and unique run-id allocation |
-| `runtime` | the durable executor — `step_once` (the pure decision), `drive` (persisting loop with budgets, checkpoints, crash), `resume_run`, `replay_run`, `cancel_run` |
+| `store` | the durable goal store: `goal.json`, `state.json`, `events.jsonl`, `checkpoints/`, `approvals/`, `receipts/`, the deterministic source `fingerprint`, canonical idempotency/approval ids, and unique run-id allocation |
+| `runtime` | the durable executor — `step_once`/`drive` (the repair loop), and the action layer's `drive_actions` (a fixed plan with approval gates and receipts); `resume_run`/`replay_run` dispatch on `GoalRecord.kind` |
+| `action` | the action layer: the `ActionPlan` model, the offline deterministic **fake tools** (`invoke_fake_tool`), and the built-in goal catalog (`ResolveDuplicateCharge`, `ShipHotfixPR`) |
 | `fmt` | the one canonical formatter — a precedence-aware, idempotent AST pretty-printer (goals included) |
 | `schema` | versioned JSON Schemas for every machine output, embedded and served by `tach schema` |
 | `trace` | persist/load `fix`/`race` runs to `.tach/trace.json` (the per-goal history lives in the store) |
@@ -162,8 +163,65 @@ exactly as it was; the durable state lives entirely under `.tach/goals/<run_id>/
   goal.json               the resolved GoalSpec + the base source snapshot
   state.json              the mutable RunState head (status, step, metrics)
   events.jsonl            append-only history (one tach.event.v1 per line)
-  checkpoints/<step>.json a workspace snapshot taken after each step
+  checkpoints/<step>.json a workspace snapshot taken after each step (repair runs)
+  approvals/<id>.json     a human approval gate on an effectful action (action runs)
+  receipts/<id>.json      durable proof an effectful action ran exactly once (action runs)
 ```
+
+## The action layer (`action` + `runtime::drive_actions`)
+
+A *business* goal is the same durable spine — run ids, the append-only log, `state.json` —
+but its unit of work is not "verify a typed patch", it is "invoke a tool and write a receipt".
+It runs a fixed `ActionPlan` (Rust data, from a built-in catalog; the goal's authority/budget
+live in a real `goal` declaration), where steps may pause for human approval and effectful
+steps must produce a receipt. `tach goal run ResolveDuplicateCharge` is the killer demo: look
+up a duplicate charge, refund it **behind an approval gate**, notify the customer, close the
+ticket — with *exactly one* refund, even across a crash.
+
+```
+drive_actions(goal, plan):
+  loop:
+    if cursor >= budget.steps: budget_exhausted; stop      # budget bills the cursor
+    if cursor >= plan.len:     completed; stop
+    action = plan[cursor]
+    if action.tool not in allow.tools: failed; stop        # authority, every step
+    if action.requires_approval:
+      approval = read approvals/<id>                        # the file IS the truth
+      None     -> write pending; emit action.proposed, approval.requested; pause
+      pending  -> pause
+      denied   -> emit action.skipped; status = denied; stop
+      granted  -> fall through and execute
+    if action.effectful:
+      if receipt exists for idempotency_key:
+        emit receipt.reused, action.skipped                 # never call the tool twice
+      else:
+        emit tool.called; out = invoke_fake_tool(...)
+        save receipt(out)                                   # <- the commit point
+        emit tool.completed, receipt.created
+    cursor += 1; save state                                 # <- the SOLE commit past a step
+```
+
+The one invariant that makes crash/resume safe: **advancing the cursor and saving state is the
+only commit that moves past an action or clears an approval gate.** Until that save, the action
+is "not done" durably. So every crash window resolves correctly:
+
+- **Crash after the receipt, before the cursor advance** → resume re-enters the same action,
+  the approval is still `granted`, the receipt scan hits, and it emits `receipt.reused` instead
+  of calling the tool again. No duplicate effect.
+- **Crash after the cursor advance** → resume enters at the next action; the finished one is
+  never touched.
+- **Crash during the pause** → resume sees the approval still `pending` and waits. The human
+  decision is recorded once, by the `approve`/`deny` command, as a real event in the log.
+
+Idempotency keys and approval/receipt ids are FNV-1a digests over a *canonical* (sorted-key)
+byte serialization — no clock, no randomness — the same discipline as `store::fingerprint`.
+`replay_action_run` re-derives the run purely: it reads the recorded approvals as the run's
+human *inputs*, re-invokes the deterministic fake tools, and proves the terminal status and the
+receipt set reproduce. (It deliberately does **not** compare event sequences: a crashed-then-
+resumed run has a longer log than a straight one, yet produces identical effects.)
+
+No ambient authority, and the working tree is never touched: an action goal proves its work
+entirely through receipts under `.tach/goals/<run_id>/`.
 
 ## Why an interpreter (for now)
 

@@ -551,7 +551,7 @@ fn value_eq(a: &Value, b: &Value) -> bool {
         (Record(x), Record(y)) => {
             x.len() == y.len()
                 && x.iter()
-                    .all(|(k, v)| y.get(k).map_or(false, |w| value_eq(v, w)))
+                    .all(|(k, v)| y.get(k).is_some_and(|w| value_eq(v, w)))
         }
         (Ok(x), Ok(y)) | (Err(x), Err(y)) => value_eq(x, y),
         (Variant(x), Variant(y)) => x == y,

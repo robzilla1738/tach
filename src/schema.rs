@@ -41,6 +41,16 @@ pub const SCHEMAS: &[Schema] = &[
         json: include_str!("../schemas/run.schema.json"),
     },
     Schema {
+        name: "approval",
+        title: "action approval gate (approvals/<id>.json)",
+        json: include_str!("../schemas/approval.schema.json"),
+    },
+    Schema {
+        name: "receipt",
+        title: "effect receipt (receipts/<id>.json)",
+        json: include_str!("../schemas/receipt.schema.json"),
+    },
+    Schema {
         name: "bench",
         title: "suite bench output (`tach bench --suite --json`)",
         json: include_str!("../schemas/bench.schema.json"),

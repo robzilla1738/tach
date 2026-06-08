@@ -150,6 +150,56 @@ A fingerprint is not an identity, though: a fresh run of the same goal over the 
 atomically claims a new, unique id (`run_<hash>-2`, `-3`, …) and can never overwrite a
 prior run's history.
 
+## The action layer: a goal that *does* something
+
+Repair goals fix code. **Action goals run a business workflow** — they propose effectful
+actions, pause for human approval, call tools, and prove each effect with a durable
+**receipt**. Two ship built-in (no setup): `ResolveDuplicateCharge` and `ShipHotfixPR`.
+Everything is offline and deterministic — the "tools" are fakes, no key required.
+
+The killer demo: **a goal that refunds a duplicate charge behind an approval gate, survives a
+crash mid-refund, and refunds exactly once.**
+
+```console
+$ tach goal run ResolveDuplicateCharge
+● ResolveDuplicateCharge  run_3f8b062b8280c330
+  status               awaiting_approval
+  actions-executed     1
+  cursor               1
+  receipts             0
+  awaiting-approval    apr_efa727c214fb
+  ⏸ awaiting approval — review with tach goal approvals run_3f8b062b8280c330
+
+$ tach goal approve run_3f8b062b8280c330 apr_efa727c214fb
+  ✓ approved `apr_efa727c214fb` — resume with tach goal resume run_3f8b062b8280c330
+
+$ tach goal resume run_3f8b062b8280c330 --crash-after step:4
+  ✗ crashed after step 4 (simulated). State is durable.   # refund already done & receipted
+
+$ tach goal resume run_3f8b062b8280c330
+● ResolveDuplicateCharge  run_3f8b062b8280c330
+  status               completed
+  receipts             3
+  ✓ goal completed — 3 receipt(s). See tach goal receipts run_3f8b062b8280c330
+
+$ tach goal receipts run_3f8b062b8280c330
+  ● rcpt_235edb8551e6  fake.stripe.refund    refund     ← exactly one refund, ever
+  ● rcpt_2eb1d78d6950  fake.zendesk.comment  close
+  ● rcpt_edf8e1dd64b4  fake.email.send       notify
+
+$ tach goal replay run_3f8b062b8280c330
+  ● replay reproduced the run exactly — 4 step(s), completed
+```
+
+Why the crash can't double-refund: **advancing the plan cursor (and saving state) is the only
+commit that moves past an action.** The receipt is written *before* that commit, so a crash in
+between leaves the receipt durable but the cursor unmoved — and on resume the runtime finds the
+receipt by its idempotency key and emits `receipt.reused` instead of calling Stripe again. The
+approval file (`approvals/<id>.json`) is the single source of truth for a gate; the human's
+`approve`/`deny` is recorded once as a real event. Authority is enforced too: a plan can only
+call the tools its `allow` block grants. The whole lifecycle is in the log — `action.proposed`,
+`approval.requested`/`granted`, `tool.called`/`completed`, `receipt.created`/`reused`.
+
 ## Why this is different
 
 Rust made memory safety central. Bun made JS tooling feel instant. Tach makes the
@@ -381,19 +431,25 @@ construct with `budget`/`allow`/`require` blocks; `tach goal run` drives the loo
 those constraints, checkpointing after every step into a durable store with an append-only
 `tach.event.v1` event history; `tach goal resume` recovers a crashed run from its last
 checkpoint **without repeating work**; `tach goal replay` proves a run reproduces; and the
-`allow` block is enforced as real authority by the verification pipeline. There's a
-pluggable coder seam (`tach fix --coder fixture`) whose proposals still go through the
-exact same pipeline; `tach fmt` gives one canonical, idempotent style; `tach schema`
-publishes versioned JSON schemas for every machine output; and `tach doctor` /
-`tach explain` round out the toolchain. **43 passing tests** plus two end-to-end checks
-(red→green, and crash→resume→replay) and a schema-validation step in CI.
+`allow` block is enforced as real authority by the verification pipeline. **The action layer
+is real too:** built-in business goals (`tach goal run ResolveDuplicateCharge`) run a fixed
+plan that proposes effectful actions, pauses for human approval (`tach goal approvals` /
+`approve` / `deny`), calls offline **fake tools**, and records a durable **receipt** for every
+effect (`tach goal receipts` / `receipt`). Idempotency keys make it survive crash/resume with
+*no duplicate side effect*, and `tach goal replay` reproduces the effects from the recorded
+approvals. There's a pluggable coder seam (`tach fix --coder fixture`) whose proposals still go
+through the exact same pipeline; `tach fmt` gives one canonical, idempotent style; `tach schema`
+publishes versioned JSON schemas for every machine output (now including `approval` and
+`receipt`); and `tach doctor` / `tach explain` round out the toolchain. **63 passing tests**
+plus end-to-end checks (red→green, crash→resume→replay, and the approval/refund/receipt demo)
+and a schema-validation step in CI.
 
-**Near-term follow-ups (the roadmap the runtime is built for):** receipts + idempotency
-for side-effecting tools, human-approval interrupts (`Proposed`/`Approved`/`Receipt`),
-typed memory lanes with a context-drift detector, an existing-repo `Tachfile` mode that
-wraps Bun/Cargo/Go test commands, MCP client/server, and a portable goal ABI. The event
-log, durable store, and authority model added here are exactly the substrate those phases
-hang off. Also: multi-file user imports and comment-preserving formatting.
+**Near-term follow-ups (the roadmap the runtime is built for):** real tool integrations behind
+the fake-tool seam, a scenario DSL for crash/resume/approval tests, typed memory lanes with a
+context-drift detector, an existing-repo `Tachfile` mode that wraps Bun/Cargo/Go test commands,
+MCP client/server, and a portable goal ABI. The event log, durable store, authority model, and
+the approval/receipt substrate added here are exactly what those phases hang off. Also:
+multi-file user imports and comment-preserving formatting.
 
 **Deliberately scoped out:** native/LLVM codegen (today it interprets), a borrow checker,
 a package manager, an LSP server, and a *model-backed* coder. The loop already has the
@@ -405,9 +461,10 @@ model-free, so everything is fully reproducible offline.
 ## Testing
 
 ```console
-$ cargo test               # unit + integration tests (43)
-$ bash scripts/e2e.sh      # new → check → fix → test demo, asserts green
-$ bash scripts/goal_e2e.sh # goal run → crash → resume → replay, asserts no repeated work
+$ cargo test                 # unit + integration tests (63)
+$ bash scripts/e2e.sh        # new → check → fix → test demo, asserts green
+$ bash scripts/goal_e2e.sh   # goal run → crash → resume → replay, asserts no repeated work
+$ bash scripts/action_e2e.sh # approve → crash → resume → replay, asserts exactly one refund
 ```
 
 CI (`.github/workflows/ci.yml`) runs all three on every push, plus `tach fmt --check` and

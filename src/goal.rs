@@ -111,6 +111,14 @@ impl GoalSpec {
     pub fn requires_tests_pass(&self) -> bool {
         self.require.iter().any(|c| c == "tests.pass")
     }
+
+    /// The exact set of tools this goal is authorized to call. Always a concrete
+    /// set — a goal that grants none can call none, the safe default. The action
+    /// runtime checks every tool call against this before invoking it, so a plan
+    /// can only ever do what its `allow` block names: no ambient authority.
+    pub fn allowed_tools(&self) -> BTreeSet<String> {
+        self.allow.tools.iter().cloned().collect()
+    }
 }
 
 /// Find a goal declaration by name across a parsed program.

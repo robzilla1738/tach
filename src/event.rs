@@ -65,6 +65,23 @@ pub mod kind {
     pub const RUN_COMPLETED: &str = "run.completed";
     pub const RUN_FAILED: &str = "run.failed";
     pub const RUN_CANCELLED: &str = "run.cancelled";
+
+    // ----- Action Layer -----
+    // A long-horizon *business* goal does not patch source; it proposes effectful
+    // actions, pauses for human approval, calls (fake) tools, and proves each
+    // effect with a durable receipt. These kinds record that lifecycle.
+    pub const ACTION_PROPOSED: &str = "action.proposed";
+    pub const APPROVAL_REQUESTED: &str = "approval.requested";
+    pub const APPROVAL_GRANTED: &str = "approval.granted";
+    pub const APPROVAL_DENIED: &str = "approval.denied";
+    pub const TOOL_CALLED: &str = "tool.called";
+    pub const TOOL_COMPLETED: &str = "tool.completed";
+    pub const TOOL_FAILED: &str = "tool.failed";
+    pub const RECEIPT_CREATED: &str = "receipt.created";
+    /// An effectful action re-entered on resume whose receipt already exists — the
+    /// tool is *not* called again. This is the no-duplicate-side-effect guarantee.
+    pub const RECEIPT_REUSED: &str = "receipt.reused";
+    pub const ACTION_SKIPPED: &str = "action.skipped";
 }
 
 /// An append-only JSONL writer over a run's `events.jsonl`. Each `append` writes

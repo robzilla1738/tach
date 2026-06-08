@@ -24,9 +24,12 @@ driving it can be *trivial*. Every Tach diagnostic carries a machine-applicable
 doesn't need to reason about your code; it reads the fix off the error and applies it
 through a pipeline that proves the change is safe before it touches a file.
 
-This repo is a **working v0**: a real lexer, parser, type + effect checker, deterministic
-interpreter, test runner, typed-patch pipeline, and the agent loop — all in Rust, with a
-single static binary and zero language-model dependency for the core demo.
+This repo is a **working compiler and toolchain**: a real lexer, a Pratt parser, a type +
+effect checker that emits **nine patch-carrying diagnostics**, user-defined sum types with
+`match`, a deterministic interpreter, a hermetic test runner, the typed-patch verification
+pipeline, the agent repair loop (with a pluggable coder seam), a canonical formatter, and a
+suite-level benchmark — all in Rust, in a single static binary with **zero language-model
+dependency** for everything that matters.
 
 ## The 60-second demo
 
@@ -109,6 +112,24 @@ $ tach check --json
   }
 }
 ```
+
+Nine diagnostics ship today, and every one that admits a mechanical fix carries a
+`preferred_patch`:
+
+| Code | Kind | The fix it carries |
+| --- | --- | --- |
+| `E0322` | `unknown_module` | insert the missing `import` |
+| `E0421` | `effect_undeclared` | add / extend the `effects [...]` clause |
+| `E0450` | `effect_unused` *(warning)* | trim effects the function doesn't perform |
+| `E0309` | `type_mismatch` | fix the annotation, or convert the value |
+| `E0330` | `unknown_field` | rename to the nearest field (did-you-mean) |
+| `E0340` | `non_exhaustive_match` | insert an arm for each missing variant |
+| `E0341` | `unknown_variant` | rename to the nearest variant (did-you-mean) |
+| `E0460` | `unused_import` *(warning)* | remove the unused `import` line |
+| `E0461` | `unused_variable` *(warning)* | prefix the binding with `_` |
+
+The did-you-mean repairs only fire when a real name is a small edit away — they never guess
+wildly, because an agent would dutifully apply a bad rename.
 
 ### 2. Agents submit typed patches, not raw diffs
 
@@ -214,6 +235,23 @@ test "expired session is rejected" {
 }
 ```
 
+It also has user-defined **sum types** and `match` — and a `match` on an enum must cover
+every variant, or the compiler hands you a patch that inserts the missing arm:
+
+```tach
+type Parity = Even | Odd
+
+fn describe(p: Parity) -> String {
+  return match p {
+    Even => "even"
+    Odd => "odd"
+  }
+}
+```
+
+There's **one formatter**: `tach fmt` renders any file to a single canonical, idempotent
+style, and `tach fmt --check` gates it in CI.
+
 See [`docs/LANGUAGE.md`](docs/LANGUAGE.md) for the full tour.
 
 ## How it's built
@@ -223,10 +261,11 @@ Single Rust crate, cleanly separated modules:
 ```
 src/
   lexer · parser · ast       front-end (spans double as edit coordinates)
-  check                      type + effect analysis → structured diagnostics
-  interp · builtins · runner deterministic tree-walking runtime + test runner
+  check · types · builtins   type + effect analysis → structured diagnostics
+  interp · runner            deterministic tree-walking runtime + test runner
   patch                      Workspace, typed patches, the verify pipeline, impact analysis
-  agent                      the fix loop, race, metrics
+  agent                      the fix loop, the coder seam, race, suite bench, metrics
+  fmt                        the one canonical formatter
   trace · render · cli       persistence, pretty output, the `tach` binary
 ```
 
@@ -242,13 +281,19 @@ scope, effects, and regressions; the deterministic loop drives the demo to green
 `tach bench --suite corpus` benchmarks the loop over a suite of broken projects, one per
 diagnostic family. There's a pluggable coder seam (`tach fix --coder fixture`) for the
 cases structured repair can't reach — a logic bug — whose proposals still go through the
-exact same verification pipeline. 26 passing tests plus an end-to-end check in CI.
+exact same verification pipeline; and `tach fmt` gives the project one canonical,
+idempotent style, gated in CI. **32 passing tests** plus an end-to-end check and a
+formatter check in CI.
+
+**Near-term follow-ups:** multi-file user imports (`import ./module`), and
+comment-preserving formatting (today `tach fmt` skips files with comments rather than
+dropping them).
 
 **Deliberately scoped out:** native/LLVM codegen (today it interprets), a borrow checker,
-a package manager, and a *model-backed* coder. The loop already has the seam — a `Coder`
-trait, exercised offline by a deterministic fixture coder — so a real model slots in
-behind a flag later. The core demo and the whole test suite stay model-free, so
-everything is fully reproducible offline.
+a package manager, an LSP server, and a *model-backed* coder. The loop already has the
+seam — a `Coder` trait, exercised offline by a deterministic fixture coder — so a real
+model slots in behind a flag later. The core demo and the whole test suite stay
+model-free, so everything is fully reproducible offline.
 
 ## Testing
 

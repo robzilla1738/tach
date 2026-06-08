@@ -140,6 +140,16 @@ The interpreter has a fixed clock, no randomness, and no real I/O. Every run is
 reproducible — which is what lets `tach replay` re-execute a recorded agent loop and get
 byte-identical results, and what makes the agent-loop metrics trustworthy.
 
+## Formatting
+
+There is **one formatter**. `tach fmt` renders any file to a single canonical style
+(2-space indent, multi-line records and `match` arms, canonical spacing); it is
+deterministic and idempotent, and only parenthesizes a subexpression when dropping the
+parens would change the parse. `tach fmt --check` writes nothing and exits non-zero if
+anything would change — the CI gate. The formatter never reformats a file it can't render
+losslessly: files with syntax errors or comments are left untouched (comment-preserving
+formatting is a planned follow-up).
+
 ## Diagnostics you'll meet
 
 | Code | Kind | Fix it offers |

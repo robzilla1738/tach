@@ -10,12 +10,14 @@ cargo build --release  # single optimized static binary at target/release/tach
 ## Test
 
 ```console
-cargo test             # 11 unit/integration tests across the front-end, checker,
-                       # runtime, patch pipeline, and agent loop
+cargo test             # 32 unit/integration tests across the front-end, checker,
+                       # runtime, patch pipeline, agent loop, and formatter
 bash scripts/e2e.sh    # full end-to-end: new → check (expect red) → fix → check/test (green)
+tach fmt --check       # the project's .tach files are in one canonical style
 ```
 
-CI runs all of the above on every push — see `.github/workflows/ci.yml`.
+CI runs all of the above on every push — `cargo fmt --check`, `cargo build`, `cargo test`,
+the end-to-end demo, and `tach fmt --check` over the corpus. See `.github/workflows/ci.yml`.
 
 ## For automated / cloud agents
 
@@ -26,10 +28,12 @@ This repo is friendly to headless verification:
 - **Single binary.** `cargo build --release` produces `target/release/tach` with no runtime
   dependencies.
 - **Machine-readable everywhere.** `tach check --json`, `tach test --json`, `tach trace --json`,
-  and `tach audit --json` emit stable JSON. Diagnostics include a `preferred_patch`
-  (`file` + `span` + `replacement`) you can apply directly.
+  `tach bench --suite corpus --json`, and `tach audit --json` emit stable JSON. Diagnostics
+  include a `preferred_patch` (`file` + `span` + `replacement`) you can apply directly.
 - **Deterministic, replayable runs.** `tach fix` writes `.tach/trace.json`; `tach replay`
-  re-runs it and asserts byte-identical results. Use this as an oracle.
+  re-runs it and asserts byte-identical results. `tach fmt` is idempotent. Use these as oracles.
+- **A repair corpus.** `corpus/` holds one broken project per diagnostic family; `tach bench
+  --suite corpus` drives them all red → green and reports the agent-era metrics.
 - **One-command smoke test:**
 
   ```console
@@ -45,10 +49,18 @@ This repo is friendly to headless verification:
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). The short version: the front-end
 (`lexer`/`parser`/`ast`) feeds both the `check`er (which produces patch-carrying
 diagnostics) and the `interp`reter (which runs code and tests). The `patch` pipeline and
-`agent` loop sit on top. Spans are byte offsets so they double as edit coordinates.
+`agent` loop sit on top, the `fmt` module renders the AST back to canonical source, and
+spans are byte offsets so they double as edit coordinates.
 
 ## Conventions
 
-- `cargo fmt` before committing; keep modules small and single-purpose.
+- `cargo fmt` (Rust) before committing; keep modules small and single-purpose.
+- `tach fmt` (Tach) keeps any committed `.tach` files canonical; `tach fmt --check` is a CI
+  gate over the corpus.
 - New diagnostics should carry a `preferred_patch` whenever a mechanical fix exists — that
-  is the core contract of the language.
+  is the core contract of the language. A guessed fix is worse than none: if the repair
+  would be a guess, emit the diagnostic without a patch.
+- Determinism is sacred — no wall-clock or randomness in anything that feeds a result, a
+  trace, or the metrics, so `tach replay` stays byte-exact. Ship model/network features
+  behind a flag with the offline path fully covered.
+- Every new diagnostic ships a test asserting its exact `preferred_patch`.

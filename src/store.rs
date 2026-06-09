@@ -663,6 +663,12 @@ pub fn allocate_run(repo: &Path, fingerprint: &str) -> io::Result<String> {
 /// Honesty: the lockfile lives in agent-writable `.tach/`, so a determined agent could
 /// delete it. This guards against *accidental* concurrency (two honest invocations) —
 /// it is not, and cannot be, a defense against an adversary with filesystem access.
+/// How long [`RunLock::acquire`] keeps retrying a contended lock before failing. Sized
+/// to outlast a same-process release latency (microseconds–milliseconds) but stay far
+/// under any real verify/commit, so a genuine cross-process conflict still fails fast.
+#[cfg(unix)]
+const LOCK_ACQUIRE_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
+
 pub struct RunLock {
     #[cfg(unix)]
     _file: fs::File,
@@ -688,14 +694,32 @@ impl RunLock {
             // Non-blocking exclusive advisory lock. Auto-released when `file` (and thus
             // the fd) drops, including on process exit — so no stale-lock recovery is
             // ever needed.
-            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-            if rc != 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    format!("run `{run_id}` is already being operated by another tach process"),
-                ));
+            //
+            // We retry `EWOULDBLOCK` for a short, bounded window before giving up. A
+            // genuine concurrent holder keeps the lock for its whole verify/commit —
+            // far longer than this window — so a real conflict still fails fast and the
+            // exactly-once guarantee is intact. The retry only absorbs the brief window
+            // where a *previous* holder in this same process has dropped its lock but
+            // the kernel has not finished releasing the `flock` on `close()` yet —
+            // observed on macOS under parallel load, e.g. an in-process `verify`
+            // immediately followed by `commit`. (In production those are separate
+            // processes, whose exit releases the lock outright, so the window is moot.)
+            let mut waited = std::time::Duration::ZERO;
+            let step = std::time::Duration::from_millis(2);
+            loop {
+                let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+                if rc == 0 {
+                    return Ok(RunLock { _file: file });
+                }
+                if waited >= LOCK_ACQUIRE_GRACE {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        format!("run `{run_id}` is already being operated by another tach process"),
+                    ));
+                }
+                std::thread::sleep(step);
+                waited += step;
             }
-            Ok(RunLock { _file: file })
         }
         #[cfg(not(unix))]
         {

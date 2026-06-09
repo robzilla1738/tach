@@ -389,6 +389,40 @@ mod tests {
         assert!(r.duration_ms < 10_000, "killed promptly, not after 30s");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn timeout_kills_the_whole_tree() {
+        // Decisive regression test for the process-group fix: the direct child
+        // (outer sh) spawns a *grandchild* (inner sh) that would touch `marker`
+        // after 2s. A timeout that killed only the direct child would leave the
+        // grandchild alive — it would run to completion and create the marker
+        // (and, separately, wedge the drain threads on the inherited pipe). The
+        // group kill must terminate the grandchild too, so the marker never
+        // appears even after we wait well past its delay.
+        let dir = TempDir::new("tree");
+        let marker = dir.path().join("marker");
+        let cmd = format!("sh -c \"sh -c 'sleep 2; : > {}'\"", marker.display());
+        let r = run(&ShellRequest {
+            command: &cmd,
+            cwd: dir.path(),
+            timeout_ms: 300,
+            artifact_dir: &dir.path().join("artifacts"),
+            key: "k4b",
+        })
+        .unwrap();
+        assert!(r.timed_out, "should have timed out");
+        assert!(
+            r.duration_ms < 10_000,
+            "drain threads unblocked promptly (grandchild's pipe was closed)"
+        );
+        // Wait past the grandchild's 2s delay; if it survived, the marker appears.
+        thread::sleep(Duration::from_millis(2_500));
+        assert!(
+            !marker.exists(),
+            "grandchild outlived the timeout — only the direct child was killed"
+        );
+    }
+
     #[test]
     fn env_is_scrubbed() {
         // A secret in the parent env must not reach the child.

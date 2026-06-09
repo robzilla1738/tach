@@ -3463,6 +3463,255 @@ mod tests {
         );
     }
 
+    // ===== Real tools in plans (http.get / http.post) =================
+
+    /// A minimal HTTP/1.1 server on a random localhost port: counts requests,
+    /// records their raw bytes, answers 200 "hello". `n` accepts, then exits.
+    fn tiny_http_server(
+        n: usize,
+    ) -> (
+        u16,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        use std::io::{Read as _, Write as _};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let count = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (c2, s2) = (count.clone(), seen.clone());
+        std::thread::spawn(move || {
+            for _ in 0..n {
+                let (mut sock, _) = match listener.accept() {
+                    Ok(x) => x,
+                    Err(_) => return,
+                };
+                sock.set_read_timeout(Some(std::time::Duration::from_millis(1000)))
+                    .ok();
+                let mut req = Vec::new();
+                let mut buf = [0u8; 4096];
+                // Read until the header/body split (plus a small body, if any).
+                loop {
+                    match sock.read(&mut buf) {
+                        Ok(0) | Err(_) => break,
+                        Ok(m) => {
+                            req.extend_from_slice(&buf[..m]);
+                            let text = String::from_utf8_lossy(&req);
+                            if let Some(split) = text.find("\r\n\r\n") {
+                                let body_len = text
+                                    .lines()
+                                    .find_map(|l| {
+                                        l.to_ascii_lowercase()
+                                            .strip_prefix("content-length:")
+                                            .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                                    })
+                                    .unwrap_or(0);
+                                if req.len() >= split + 4 + body_len {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                s2.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&req).into_owned());
+                c2.fetch_add(1, Ordering::SeqCst);
+                let _ = sock.write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-length: 5\r\nconnection: close\r\n\r\nhello",
+                );
+            }
+        });
+        (port, count, seen)
+    }
+
+    #[test]
+    fn http_get_is_receipted_and_replay_never_refires() {
+        use std::sync::atomic::Ordering;
+        let (port, count, _) = tiny_http_server(4);
+        let src = format!(
+            r#"goal Fetch -> Success {{
+  budget {{
+    steps: 5
+  }}
+  allow {{
+    http.get "http://127.0.0.1:{port}/**"
+  }}
+  plan {{
+    let r = call http.get {{ url: "http://127.0.0.1:{port}/data" }}
+  }}
+}}
+"#
+        );
+        let repo = TempRepo::new("http_get_replay");
+        let (spec, plan) = parse_plan_goal(&src, "Fetch");
+        let base: BTreeMap<String, String> = [("t.pdr".to_string(), src.clone())].into();
+        let r = start_plan_run(repo.path(), spec, plan, base, None).unwrap();
+        assert_eq!(r.state.status, "completed");
+        let id = r.state.run_id.clone();
+        assert_eq!(count.load(Ordering::SeqCst), 1, "exactly one request fired");
+
+        let receipts = store::list_receipts(repo.path(), &id);
+        assert_eq!(receipts.len(), 1);
+        let out = &receipts[0].output;
+        assert_eq!(out.get("status"), Some(&json!(200)));
+        assert_eq!(out.get("ok"), Some(&json!(true)));
+        assert_eq!(out.get("body"), Some(&json!("hello")));
+        // The body artifact holds the full bytes.
+        let artifact = out.get("body_artifact").and_then(|v| v.as_str()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join(artifact)).unwrap(),
+            "hello"
+        );
+
+        let rep = replay_plan_run(repo.path(), &id).unwrap();
+        assert!(rep.identical);
+        assert_eq!(rep.replayed_status, "completed");
+        assert_eq!(
+            count.load(Ordering::SeqCst),
+            1,
+            "replay must never re-hit the server"
+        );
+    }
+
+    #[test]
+    fn http_secret_headers_resolve_from_env_and_never_land_in_the_store() {
+        use std::sync::atomic::Ordering;
+        let (port, count, seen) = tiny_http_server(2);
+        const SECRET: &str = "Bearer sk_test_d3adb33f_secret";
+        std::env::set_var("PERDURE_TEST_AUTH_HEADER", SECRET);
+        let src = format!(
+            r#"goal Notify -> Success {{
+  budget {{
+    steps: 5
+  }}
+  allow {{
+    http.post "http://127.0.0.1:{port}/**"
+  }}
+  plan {{
+    call http.post {{
+      url: "http://127.0.0.1:{port}/v1/notify"
+      body: "event=done"
+      headers: {{ content_type: "application/x-www-form-urlencoded" }}
+      headers_env: {{ authorization: "PERDURE_TEST_AUTH_HEADER" }}
+    }}
+  }}
+}}
+"#
+        );
+        let repo = TempRepo::new("http_secret");
+        let (spec, plan) = parse_plan_goal(&src, "Notify");
+        let r = start_plan_run(repo.path(), spec, plan, BTreeMap::new(), None).unwrap();
+        assert_eq!(r.state.status, "completed");
+        let id = r.state.run_id.clone();
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+
+        // The wire saw the credential and the idempotency key…
+        let request = seen.lock().unwrap()[0].clone();
+        assert!(request.contains(SECRET), "the header reached the server");
+        assert!(
+            request.to_ascii_lowercase().contains("idempotency-key:"),
+            "every POST carries an Idempotency-Key derived from the receipt key"
+        );
+        assert!(request.contains("event=done"));
+
+        // …but NOTHING under .perdure/ contains the secret value.
+        fn walk(dir: &Path, hits: &mut Vec<String>) {
+            for e in std::fs::read_dir(dir).unwrap().flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    walk(&p, hits);
+                } else if let Ok(text) = std::fs::read_to_string(&p) {
+                    if text.contains(SECRET) {
+                        hits.push(p.display().to_string());
+                    }
+                }
+            }
+        }
+        let mut hits = Vec::new();
+        walk(&repo.path().join(".perdure"), &mut hits);
+        assert!(hits.is_empty(), "secret leaked into: {hits:?}");
+
+        // The receipt records WHICH headers were resolved, by name only.
+        let receipts = store::list_receipts(repo.path(), &id);
+        assert_eq!(
+            receipts[0].output.get("headers_env_resolved"),
+            Some(&json!(["authorization"]))
+        );
+    }
+
+    #[test]
+    fn denied_url_is_refused_before_any_connection() {
+        // Nothing listens on port 1; if the authority gate is truly pre-I/O,
+        // the failure reason is the refusal, never a connection error.
+        let src = r#"goal Reach -> Success {
+  budget {
+    steps: 5
+  }
+  allow {
+    http.get "https://allowed.example/**"
+  }
+  plan {
+    call http.get { url: "http://127.0.0.1:1/" }
+  }
+}
+"#;
+        let repo = TempRepo::new("http_denied");
+        let (spec, plan) = parse_plan_goal(src, "Reach");
+        let r = start_plan_run(repo.path(), spec, plan, BTreeMap::new(), None).unwrap();
+        assert_eq!(r.state.status, "failed");
+        let id = r.state.run_id.clone();
+        assert_eq!(count_kind(repo.path(), &id, kind::AUTHORITY_DENIED), 1);
+        assert_eq!(store::list_receipts(repo.path(), &id).len(), 0);
+        let events = read_all(&events_path(repo.path(), &id)).unwrap();
+        let denied = events
+            .iter()
+            .find(|e| e.kind == kind::AUTHORITY_DENIED)
+            .unwrap();
+        let reason = denied.payload.get("reason").unwrap().as_str().unwrap();
+        assert!(
+            reason.contains("matches none"),
+            "refused by authority, not by a socket error: {reason}"
+        );
+    }
+
+    #[test]
+    fn missing_env_var_fails_before_io_with_no_receipt() {
+        use std::sync::atomic::Ordering;
+        let (port, count, _) = tiny_http_server(1);
+        let src = format!(
+            r#"goal NeedsAuth -> Success {{
+  budget {{
+    steps: 5
+  }}
+  allow {{
+    http.post "http://127.0.0.1:{port}/**"
+  }}
+  plan {{
+    call http.post {{
+      url: "http://127.0.0.1:{port}/x"
+      headers_env: {{ authorization: "PERDURE_TEST_UNSET_VAR_XYZ" }}
+    }}
+  }}
+}}
+"#
+        );
+        std::env::remove_var("PERDURE_TEST_UNSET_VAR_XYZ");
+        let repo = TempRepo::new("http_noenv");
+        let (spec, plan) = parse_plan_goal(&src, "NeedsAuth");
+        let r = start_plan_run(repo.path(), spec, plan, BTreeMap::new(), None).unwrap();
+        assert_eq!(r.state.status, "failed");
+        let id = r.state.run_id.clone();
+        assert_eq!(
+            store::list_receipts(repo.path(), &id).len(),
+            0,
+            "nothing fired — export the variable and a fresh run is safe"
+        );
+        assert_eq!(count.load(Ordering::SeqCst), 0, "no request was sent");
+    }
+
     #[test]
     fn time_budget_zero_blocks_the_first_real_call() {
         let src = r#"goal NoTime -> Success {

@@ -24,6 +24,14 @@ path = "src/lib.rs"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# The plan language's `call http.get/http.post` tools. ureq because it is
+# synchronous (fits the blocking runtime — no async reactor enters the tree)
+# and pure Rust over rustls (static musl builds need no system OpenSSL or
+# /etc/ssl). Redirects are disabled at the call site: following one would let
+# an allowed URL bounce to a forbidden one. This is the ONLY network code in
+# the binary; src/http.rs is its single home.
+ureq = { version = "2", default-features = false, features = ["tls"] }
+
 # Unix-only: process-group control so a timed-out command and every descendant
 # it spawned are killed together (see src/shell.rs). std alone can kill the
 # direct child but cannot signal a process group.

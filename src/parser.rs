@@ -377,6 +377,8 @@ impl Parser {
                 "fs.read" => a.fs_read.extend(self.parse_glob_values()),
                 "fs.write" => a.fs_write.extend(self.parse_glob_values()),
                 "shell.run" => a.shell.extend(self.parse_glob_values()),
+                "http.get" => a.http_get.extend(self.parse_glob_values()),
+                "http.post" => a.http_post.extend(self.parse_glob_values()),
                 _ => {
                     // A bare dotted name is a tool grant, e.g. `perdure.check`.
                     a.tools.push(head);
@@ -1412,6 +1414,8 @@ fn describe(p: Parity) -> String {
     fs.read "."
     fs.write ["src/**", "tests/**"]
     shell.run ["cargo test", "bun test"]
+    http.get "https://api.example.com/**"
+    http.post ["https://api.stripe.com/v1/refunds", "https://api.stripe.com/v1/charges/**"]
     perdure.check
   }
   require {
@@ -1442,6 +1446,14 @@ fn describe(p: Parity) -> String {
         assert_eq!(g.allow.fs_read, vec!["."]);
         assert_eq!(g.allow.fs_write, vec!["src/**", "tests/**"]);
         assert_eq!(g.allow.shell, vec!["cargo test", "bun test"]);
+        assert_eq!(g.allow.http_get, vec!["https://api.example.com/**"]);
+        assert_eq!(
+            g.allow.http_post,
+            vec![
+                "https://api.stripe.com/v1/refunds",
+                "https://api.stripe.com/v1/charges/**"
+            ]
+        );
         assert_eq!(g.allow.tools, vec!["perdure.check"]);
         assert_eq!(g.require.conditions.len(), 2);
         assert_eq!(g.require.conditions[0].name, "tests.pass");

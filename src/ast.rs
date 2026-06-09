@@ -138,6 +138,11 @@ pub struct GoalAllow {
     pub fs_read: Vec<String>,
     pub fs_write: Vec<String>,
     pub shell: Vec<String>,
+    /// URL globs the plan may `call http.get { ... }` against, e.g.
+    /// `https://api.example.com/**`. Default-deny: empty grants nothing.
+    pub http_get: Vec<String>,
+    /// URL globs for `call http.post { ... }`.
+    pub http_post: Vec<String>,
     pub tools: Vec<String>,
     pub span: Span,
 }

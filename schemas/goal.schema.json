@@ -15,7 +15,7 @@
       "properties": {
         "steps": { "type": "integer", "minimum": 0, "description": "Hard cap on repair steps (enforced)." },
         "retries": { "type": "integer", "minimum": 0, "description": "Consecutive rejections tolerated before giving up (enforced)." },
-        "time": { "type": "string", "description": "Wall-clock budget, e.g. 20m (recorded)." },
+        "time": { "type": "string", "description": "Wall-clock budget, e.g. 20m. Enforced for plan runs (billed from real-tool receipt durations); recorded otherwise." },
         "cost": { "type": "integer", "description": "Cost budget (recorded)." }
       }
     },
@@ -27,7 +27,9 @@
         "effects": { "type": "array", "items": { "type": "string" }, "description": "Effects the run may newly perform." },
         "fs_read": { "type": "array", "items": { "type": "string" } },
         "fs_write": { "type": "array", "items": { "type": "string" }, "description": "Globs the run may write." },
-        "shell": { "type": "array", "items": { "type": "string" } },
+        "shell": { "type": "array", "items": { "type": "string" }, "description": "Exact commands the plan/guard may run (no globbing)." },
+        "http_get": { "type": "array", "items": { "type": "string" }, "description": "URL globs `call http.get` may reach, e.g. https://api.example.com/**." },
+        "http_post": { "type": "array", "items": { "type": "string" }, "description": "URL globs `call http.post` may reach." },
         "tools": { "type": "array", "items": { "type": "string" } }
       }
     },

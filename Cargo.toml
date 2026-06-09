@@ -6,6 +6,12 @@ description = "Tach — a typed goal runtime for long-horizon agents. The fastes
 license = "MIT"
 authors = ["Robert"]
 
+# The repo carries sample "existing" repos under fixtures/ (each with its own
+# Cargo.toml/package.json) used by the coding-harness e2e. Excluding them keeps
+# cargo from ever treating those nested manifests as packages of this crate.
+[workspace]
+exclude = ["fixtures"]
+
 [[bin]]
 name = "tach"
 path = "src/main.rs"

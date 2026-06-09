@@ -268,6 +268,64 @@ change a run already in flight. Each receipt is self-describing for audit: it re
 step it committed at, the effect, a hash of the input, the approval that authorized it, and the
 history event that recorded it (`tach goal receipt <id> <rcpt>`).
 
+## The coding harness: govern an external agent on a real repo
+
+Everything above operates on Tach's own language. The **coding harness** turns the same
+runtime — authority scopes, real command execution, receipts, replay — outward, onto an
+existing Rust / JS / Go / Python repo edited by an external agent (Claude Code, Codex,
+Cursor). Tach does not replace those agents. It makes their work scoped, verified,
+replayable, and auditable. *The agent brings the reasoning; Tach is the guardrail and the
+ledger.*
+
+```bash
+cd some-existing-repo
+tach init --existing            # writes Tachfile, TACH_AGENT.md, .tachignore (detects `cargo test`)
+tach guard begin FixFailingTests
+#   … the agent reads `tach guard context --json` and edits files …
+tach guard verify               # runs the real test command; captures a receipt; sets verified
+tach guard commit               # finalizes only if verified — and only in Tach's ledger, never git
+```
+
+The `Tachfile` is the contract: a goal in the same grammar, scoped to a real tree.
+
+```tach
+goal FixFailingTests -> Success {
+  budget {
+    steps: 40
+  }
+  allow {
+    fs.write ["src/**", "tests/**"]
+    shell.run ["cargo test"]
+  }
+  require {
+    command("cargo test").passes
+    no_out_of_scope_writes
+  }
+}
+```
+
+What Tach guarantees across a session:
+
+- **Scope gate.** `begin` snapshots the working tree; `verify`/`commit` diff against it and
+  reject any change outside the `fs.write` globs. Without a sandbox Tach can't *prevent* the
+  write — it is an honest detect-and-reject gate: the violation lands in `events.jsonl` and
+  the commit is blocked.
+- **Real commands, real receipts.** Each required command runs as a real process with a fixed
+  cwd, a scrubbed environment (secrets in the parent env never reach the child), a timeout,
+  and stdout/stderr captured to artifacts. The exit code becomes a durable
+  [receipt](#3-effects-are-first-class). `tach guard verify` reports `verified: true` only
+  when every required command passed and nothing out-of-scope changed — the one bit the agent
+  is told never to claim "done" without.
+- **Crash-safe and replayable.** A receipt is keyed by the command *and a digest of the tree
+  it ran against*, so a crashed-then-re-run `verify` over an unchanged tree reuses the proof
+  instead of re-running, while an edited tree correctly re-runs. `tach goal replay <id>`
+  re-derives the verdict from the recorded receipts without re-executing; `--rerun` actually
+  re-runs and compares.
+
+Nondeterministic evidence (stdout bytes, durations, exit timing) lives in receipts and
+artifacts; the control-flow event log stays deterministic — the same separation the action
+layer already relies on.
+
 ## Why this is different
 
 Rust made memory safety central. Bun made JS tooling feel instant. Tach makes the
@@ -399,6 +457,13 @@ The result is a single static binary. Put `target/release/tach` on your `PATH`.
 | Command | What it does |
 | --- | --- |
 | `tach new <name>` | Scaffold a project (`--clean` for an empty one, `--goal chargebacks` for a plan-goal demo) |
+| `tach init --existing` | Adopt an existing repo: write `Tachfile`, `TACH_AGENT.md`, `.tachignore` (`--force` to overwrite) |
+| `tach goal init <template>` | Write a `Tachfile` coding goal (e.g. `coding.fix-tests`) |
+| `tach guard begin <Goal>` | Open a coding-agent session over the working tree |
+| `tach guard status` / `context` | Status line, or the agent's operating contract (`--json`) |
+| `tach guard diff` | Changed files since the baseline, classified by `fs.write` scope (`--json`) |
+| `tach guard verify` | Run the goal's required commands for real; set the `verified` bit (`--rerun`) |
+| `tach guard commit` / `abort` | Finalize verified changes into Tach's ledger, or cancel the session |
 | `tach check [file]` | Type- and effect-check; `--json` for the machine view |
 | `tach run [file]` | Run the project's `main` |
 | `tach test [filter]` | Run tests (blocked while the project has errors) |

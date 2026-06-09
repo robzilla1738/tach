@@ -194,6 +194,7 @@ pub fn start_run(
         pending_approval: None,
         actions_executed: 0,
         receipts_created: 0,
+        ..Default::default()
     };
     store::save_state(repo, &state)?;
 
@@ -204,6 +205,12 @@ pub fn start_run(
 /// checkpoint, continuing the same event log.
 pub fn resume_run(repo: &Path, run_id: &str, crash_after: Option<u64>) -> io::Result<RunResult> {
     let record = store::load_goal(repo, run_id)?;
+    if record.kind == "coding" {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a coding run continues via `tach guard verify`, not `tach goal resume`",
+        ));
+    }
     if record.kind == "action" {
         // The CLI only exposes step-boundary crashes; the receipt-window hook is test-only.
         return resume_action_run(repo, run_id, crash_after.map(ActionCrash::Step));
@@ -446,8 +453,11 @@ pub struct ReplayResult {
 
 /// Re-run a recorded goal from its base source, with no persistence and no crash,
 /// and prove it reproduces the recorded final state byte-for-byte.
-pub fn replay_run(repo: &Path, run_id: &str) -> io::Result<ReplayResult> {
+pub fn replay_run(repo: &Path, run_id: &str, rerun: bool) -> io::Result<ReplayResult> {
     let record = store::load_goal(repo, run_id)?;
+    if record.kind == "coding" {
+        return crate::guard::replay(repo, run_id, rerun);
+    }
     if record.kind == "action" {
         return replay_action_run(repo, run_id);
     }
@@ -583,6 +593,7 @@ pub fn start_action_run(
         pending_approval: None,
         actions_executed: 0,
         receipts_created: 0,
+        ..Default::default()
     };
     store::save_state(repo, &state)?;
 
@@ -1465,6 +1476,7 @@ fn new_plan_state(run_id: &str, goal: &str) -> RunState {
         pending_approval: None,
         actions_executed: 0,
         receipts_created: 0,
+        ..Default::default()
     }
 }
 
@@ -1894,7 +1906,7 @@ mod tests {
         let repo = TempRepo::new("replay");
         let (spec, ws) = demo();
         let r = start_run(repo.path(), spec, ws, Strategy::Minimal, None).unwrap();
-        let replay = replay_run(repo.path(), &r.state.run_id).unwrap();
+        let replay = replay_run(repo.path(), &r.state.run_id, false).unwrap();
         assert!(
             replay.identical,
             "replay diverged: {:?} vs {:?}",

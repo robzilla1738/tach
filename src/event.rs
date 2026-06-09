@@ -82,6 +82,20 @@ pub mod kind {
     /// tool is *not* called again. This is the no-duplicate-side-effect guarantee.
     pub const RECEIPT_REUSED: &str = "receipt.reused";
     pub const ACTION_SKIPPED: &str = "action.skipped";
+
+    // ----- Coding / guard layer -----
+    // A coding goal does not patch toy source or call fake tools; it gates an
+    // external agent editing a real repo. These kinds record that session: the
+    // baseline snapshot, real command execution, scope rejections, verification,
+    // and the final accept-into-the-ledger commit.
+    pub const GUARD_BEGUN: &str = "guard.begun";
+    pub const FS_SNAPSHOTTED: &str = "fs.snapshotted";
+    pub const SHELL_EXECUTED: &str = "shell.executed";
+    pub const SCOPE_VIOLATION: &str = "scope.violation";
+    pub const VERIFY_PASSED: &str = "verify.passed";
+    pub const VERIFY_FAILED: &str = "verify.failed";
+    pub const GUARD_COMMITTED: &str = "guard.committed";
+    pub const GUARD_ABORTED: &str = "guard.aborted";
 }
 
 /// An append-only JSONL writer over a run's `events.jsonl`. Each `append` writes

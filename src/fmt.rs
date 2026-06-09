@@ -159,7 +159,7 @@ fn fmt_goal(g: &GoalDecl) -> String {
     if !r.conditions.is_empty() {
         s.push_str(&format!("{}require {{\n", pad(STEP)));
         for c in &r.conditions {
-            s.push_str(&format!("{}{}\n", pad(STEP * 2), c.name));
+            s.push_str(&format!("{}{}\n", pad(STEP * 2), fmt_require_cond(c)));
         }
         s.push_str(&format!("{}}}\n", pad(STEP)));
     }
@@ -253,6 +253,15 @@ fn fmt_plan_call(c: &PlanCall, indent: usize) -> String {
     }
     s.push_str(&format!("{}}}", pad(indent)));
     s
+}
+
+/// Render a require condition: a bare predicate, or the parameterized
+/// `command("…").passes` form when it carries an argument.
+fn fmt_require_cond(c: &RequireCond) -> String {
+    match (&c.arg, &c.pred) {
+        (Some(arg), Some(pred)) => format!("{}(\"{}\").{}", c.name, escape(arg), pred),
+        _ => c.name.clone(),
+    }
 }
 
 /// A single glob renders bare; several render as a `[...]` list.

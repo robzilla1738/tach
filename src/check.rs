@@ -109,6 +109,9 @@ pub const KNOWN_REQUIRE_CONDS: &[&str] = &[
     "no_new_effects",
     "no_forbidden_effects",
     "check.clean",
+    // Coding-harness predicates, evaluated by the guard runtime.
+    "no_out_of_scope_writes",
+    "no_unapproved_effects",
 ];
 
 /// Validate a `goal` declaration. Goal validation is deliberately permissive
@@ -122,6 +125,26 @@ fn check_goal(g: &GoalDecl, unit: &Unit, diags: &mut Vec<Diagnostic>) {
     // Its plan is validated separately by `check_plan_goal`.
     if g.plan.is_none() {
         for c in &g.require.conditions {
+            // The parameterized `command("…").passes` form is a coding-goal success
+            // condition the guard runtime evaluates; only `passes` is supported.
+            if c.arg.is_some() {
+                if c.name != "command" || c.pred.as_deref() != Some("passes") {
+                    diags.push(
+                        Diagnostic::warning(
+                            "E0431",
+                            "unknown_require_condition",
+                            format!(
+                                "`{}(...)` is not a success condition the runtime can check",
+                                c.name
+                            ),
+                            &unit.source.path,
+                            c.span,
+                        )
+                        .with_note("the only parameterized condition is `command(\"…\").passes`"),
+                    );
+                }
+                continue;
+            }
             if !KNOWN_REQUIRE_CONDS.contains(&c.name.as_str()) {
                 diags.push(
                     Diagnostic::warning(

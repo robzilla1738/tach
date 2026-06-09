@@ -11,6 +11,7 @@
 //! authority scopes, append-only event history, checkpoints, resume, and replay.
 
 pub mod action;
+pub mod adopt;
 pub mod agent;
 pub mod ast;
 pub mod builtins;
@@ -20,6 +21,7 @@ pub mod diagnostics;
 pub mod event;
 pub mod fmt;
 pub mod goal;
+pub mod guard;
 pub mod interp;
 pub mod lexer;
 pub mod parser;
@@ -31,6 +33,8 @@ pub mod render;
 pub mod runner;
 pub mod runtime;
 pub mod schema;
+pub mod shell;
+pub mod snapshot;
 pub mod source;
 pub mod span;
 pub mod store;

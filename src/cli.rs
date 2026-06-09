@@ -861,7 +861,9 @@ fn cmd_init(rest: &[String]) -> i32 {
                     term::bold(&rep.command)
                 ),
                 None => println!(
-                    "  {} could not detect a test command — edit `shell.run` in Tachfile",
+                    "  {} could not detect a test command — set your real one in the Tachfile \
+                     (`shell.run` + `require command(…)`); `tach guard begin` refuses the \
+                     placeholder",
                     term::bold_yellow("!")
                 ),
             }

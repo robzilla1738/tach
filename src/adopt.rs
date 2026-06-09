@@ -90,11 +90,19 @@ fn js_test_command(pm: &str) -> String {
     }
 }
 
+/// The test command an adopted Tachfile carries when Tach could not detect the repo's
+/// real one. Deliberately *not* prefixed with `echo`: run as-is it is "command not
+/// found" — a non-zero exit — so a guard can never vacuously verify against an
+/// unresolved placeholder. `tach guard begin` also recognizes this marker and refuses
+/// to open a session until a human supplies the real command. A safe placeholder beats
+/// a convenient one.
+pub const PLACEHOLDER_COMMAND: &str = "set-your-test-command";
+
 /// The default `Detected` used when nothing matched, so adoption still produces a
 /// well-formed Tachfile (with a clearly-marked placeholder command to fill in).
 fn placeholder() -> Detected {
     Detected {
-        command: "echo set-your-test-command".into(),
+        command: PLACEHOLDER_COMMAND.into(),
         typecheck: None,
         ecosystem: "unknown",
         write_globs: vec!["src/**".into(), "tests/**".into()],

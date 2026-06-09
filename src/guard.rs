@@ -207,6 +207,29 @@ pub fn begin(repo: &Path, goal_name: Option<&str>) -> io::Result<RunState> {
             ),
         ));
     }
+    // A repo Tach couldn't fingerprint at adoption ships a placeholder test command
+    // (see `adopt::PLACEHOLDER_COMMAND`) that fails if run. Refuse to open a guard
+    // against it: a session whose only "proof of success" is an unresolved placeholder
+    // is a gate that verifies nothing. Fail here — early, with an actionable message —
+    // rather than after the agent has done work and hit a cryptic command failure at
+    // `verify`. (The placeholder also fails if ever run, so a hand-crafted goal.json
+    // that skips `begin` still can't verify against it.)
+    if spec
+        .required_commands()
+        .iter()
+        .any(|c| c.contains(crate::adopt::PLACEHOLDER_COMMAND))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "coding goal `{}` still carries the placeholder test command — Tach could \
+                 not detect this repo's test command when it was adopted. Replace the \
+                 `shell.run` / `require {{ command(\"…\").passes }}` lines in the Tachfile \
+                 with your real test command before opening a guard session",
+                spec.name
+            ),
+        ));
+    }
 
     let fingerprint = store::fingerprint(&spec.name, &BTreeMap::new());
     let run_id = store::allocate_run(repo, &fingerprint)?;
@@ -1430,6 +1453,28 @@ mod tests {
         assert!(
             err.to_string().contains("fs.write"),
             "begin must reject a coding goal with no write scope: {err}"
+        );
+    }
+
+    #[test]
+    fn begin_rejects_unresolved_placeholder_command() {
+        // A repo Tach couldn't fingerprint at adoption ships the failing placeholder
+        // command. Opening a guard against it must be refused — an unresolved
+        // placeholder proves nothing, and the old `echo …` placeholder exited 0.
+        let r = TempRepo::new("placeholder");
+        r.write("Cargo.toml", "[package]\nname=\"x\"\n");
+        r.write(
+            "Tachfile",
+            &crate::adopt::coding_goal_source(
+                "FixFailingTests",
+                crate::adopt::PLACEHOLDER_COMMAND,
+                &["src/**".to_string()],
+            ),
+        );
+        let err = begin(r.path(), None).unwrap_err();
+        assert!(
+            err.to_string().contains("placeholder"),
+            "begin must reject an unresolved placeholder command: {err}"
         );
     }
 

@@ -1,11 +1,32 @@
 //! Project I/O: discovering `.tach` files into a `Workspace`, writing verified
 //! results back, and scaffolding new projects with `tach new`.
 
+use crate::diagnostics::Diagnostic;
 use crate::patch::Workspace;
+use crate::program::Program;
+use crate::source::SourceFile;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+
+/// The conventional name of a coding goal file at a real repo's root. Unlike toy
+/// `.tach` source, a `Tachfile` is the one place a coding goal lives, so a real
+/// Rust/JS repo (which has no `.tach` files) is still adoptable. Written by
+/// `tach init --existing` and parsed with the same goal grammar.
+pub const TACHFILE: &str = "Tachfile";
+
+/// Load and parse the repo's `Tachfile`, if present, into a `Program` plus its
+/// parse diagnostics. Used by the guard runtime to resolve a coding goal — it does
+/// not go through `load_workspace`, which only sees `*.tach`.
+pub fn load_goal_file(repo: &Path) -> io::Result<(Program, Vec<Diagnostic>)> {
+    let path = repo.join(TACHFILE);
+    let text = fs::read_to_string(&path)?;
+    Ok(Program::parse_sources(vec![SourceFile::new(
+        TACHFILE.to_string(),
+        text,
+    )]))
+}
 
 /// Load every `.tach` file under `root` into a workspace, keyed by path relative
 /// to `root` (using forward slashes for stability).

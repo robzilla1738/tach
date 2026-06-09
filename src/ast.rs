@@ -151,9 +151,16 @@ pub struct GoalRequire {
 }
 
 /// One success condition, carrying its span so the checker can point at it.
+///
+/// Most conditions are a bare dotted predicate (`tests.pass`, `no_new_effects`),
+/// in which case `arg`/`pred` are `None`. The coding harness adds a parameterized
+/// form — `command("cargo test").passes` — where `name` is `"command"`, `arg`
+/// holds the command string, and `pred` holds the predicate (`passes`).
 #[derive(Clone, Debug)]
 pub struct RequireCond {
     pub name: String,
+    pub arg: Option<String>,
+    pub pred: Option<String>,
     pub span: Span,
 }
 

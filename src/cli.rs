@@ -12,7 +12,9 @@ use crate::patch::Workspace;
 use crate::program::Program;
 use crate::runner::run_tests;
 use crate::trace::{self, TraceFile};
-use crate::{action, builtins, event, fmt, plan, project, render, runtime, schema, store, term};
+use crate::{
+    action, adopt, builtins, event, fmt, guard, plan, project, render, runtime, schema, store, term,
+};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -23,6 +25,8 @@ pub fn run(args: Vec<String>) -> i32 {
     };
     match cmd {
         "new" => cmd_new(&rest),
+        "init" => cmd_init(&rest),
+        "guard" => cmd_guard(&rest),
         "check" => cmd_check(&rest),
         "run" => cmd_run(&rest),
         "test" => cmd_test(&rest),
@@ -803,6 +807,7 @@ fn cmd_goal(rest: &[String]) -> i32 {
     };
     match sub {
         "run" => cmd_goal_run(&rest),
+        "init" => cmd_goal_init(&rest),
         "check" => cmd_goal_check(&rest),
         "list" => cmd_goal_list(&rest),
         "inspect" => cmd_goal_inspect(&rest),
@@ -825,6 +830,378 @@ fn cmd_goal(rest: &[String]) -> i32 {
             2
         }
     }
+}
+
+// ----- coding harness: init & guard -----
+
+/// Repo-relative display of a path the adoption wrote (absolute under `root`).
+fn show_rel(root: &Path, p: &Path) -> String {
+    p.strip_prefix(root).unwrap_or(p).display().to_string()
+}
+
+/// `tach init --existing` — adopt the current repo for the coding harness.
+fn cmd_init(rest: &[String]) -> i32 {
+    let p = parse(rest, &[]);
+    if !p.has("--existing") {
+        eprintln!(
+            "{} usage: tach init --existing [--force]",
+            term::bold_red("error:")
+        );
+        eprintln!("  adopts the current repo: writes Tachfile, TACH_AGENT.md, .tachignore");
+        return 2;
+    }
+    let root = cwd();
+    match adopt::init_existing(&root, p.has("--force")) {
+        Ok(rep) => {
+            match &rep.detected {
+                Some(d) => println!(
+                    "  {} detected {} project — test command: {}",
+                    term::green("✓"),
+                    d.ecosystem,
+                    term::bold(&rep.command)
+                ),
+                None => println!(
+                    "  {} could not detect a test command — edit `shell.run` in Tachfile",
+                    term::bold_yellow("!")
+                ),
+            }
+            for f in &rep.written {
+                println!("  {} wrote {}", term::green("+"), show_rel(&root, f));
+            }
+            for f in &rep.skipped {
+                println!(
+                    "  {} kept existing {} (use --force to overwrite)",
+                    term::dim("·"),
+                    show_rel(&root, f)
+                );
+            }
+            println!();
+            println!(
+                "  next:  {}",
+                term::bold(&format!("tach guard begin {}", rep.goal_name))
+            );
+            0
+        }
+        Err(e) => {
+            eprintln!("{} {}", term::bold_red("error:"), e);
+            1
+        }
+    }
+}
+
+/// `tach goal init <template>` — (re)write the Tachfile for a coding goal.
+fn cmd_goal_init(rest: &[String]) -> i32 {
+    let p = parse(rest, &[]);
+    let id = p
+        .pos
+        .first()
+        .map(|s| s.as_str())
+        .unwrap_or("coding.fix-tests");
+    let root = cwd();
+    match adopt::goal_init(&root, id) {
+        Ok((path, name, command)) => {
+            println!(
+                "  {} wrote {} — goal {} verified by {}",
+                term::green("✓"),
+                show_rel(&root, &path),
+                term::bold(&name),
+                term::bold(&command)
+            );
+            println!(
+                "  begin with  {}",
+                term::bold(&format!("tach guard begin {name}"))
+            );
+            0
+        }
+        Err(e) => {
+            eprintln!("{} {}", term::bold_red("error:"), e);
+            1
+        }
+    }
+}
+
+/// Resolve the run id for a guard subcommand: an explicit positional, else the
+/// remembered active session.
+fn active_or_pos(p: &Parsed, root: &Path) -> Result<String, i32> {
+    if let Some(id) = p.pos.first() {
+        return Ok(id.clone());
+    }
+    match store::active_guard(root) {
+        Some(id) => Ok(id),
+        None => {
+            eprintln!(
+                "{} no active guard session — run `tach guard begin <Goal>`",
+                term::bold_red("error:")
+            );
+            Err(2)
+        }
+    }
+}
+
+fn print_json<T: serde::Serialize>(v: &T) {
+    println!("{}", serde_json::to_string_pretty(v).unwrap_or_default());
+}
+
+fn cmd_guard(rest: &[String]) -> i32 {
+    let (sub, rest) = match rest.split_first() {
+        Some((s, r)) => (s.as_str(), r.to_vec()),
+        None => ("", Vec::new()),
+    };
+    match sub {
+        "begin" => cmd_guard_begin(&rest),
+        "status" => cmd_guard_status(&rest),
+        "context" => cmd_guard_context(&rest),
+        "diff" => cmd_guard_diff(&rest),
+        "verify" => cmd_guard_verify(&rest),
+        "commit" => cmd_guard_commit(&rest),
+        "abort" => cmd_guard_abort(&rest),
+        "" => {
+            print_guard_help();
+            0
+        }
+        other => {
+            eprintln!(
+                "{} unknown `tach guard` subcommand `{}`",
+                term::bold_red("error:"),
+                other
+            );
+            print_guard_help();
+            2
+        }
+    }
+}
+
+fn cmd_guard_begin(rest: &[String]) -> i32 {
+    let p = parse(rest, &[]);
+    let root = cwd();
+    match guard::begin(&root, p.pos.first().map(|s| s.as_str())) {
+        Ok(state) => {
+            let _ = store::set_active_guard(&root, &state.run_id);
+            if p.has("--json") {
+                if let Ok(ctx) = guard::context(&root, &state.run_id) {
+                    print_json(&ctx);
+                }
+            } else {
+                println!(
+                    "  {} guard session {} open — goal {}",
+                    term::bold_green("●"),
+                    term::bold(&state.run_id),
+                    term::bold(&state.goal)
+                );
+                println!(
+                    "  edit files in scope, then  {}",
+                    term::bold("tach guard verify")
+                );
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("{} {}", term::bold_red("error:"), e);
+            1
+        }
+    }
+}
+
+fn cmd_guard_status(rest: &[String]) -> i32 {
+    let p = parse(rest, &[]);
+    let root = cwd();
+    let id = match active_or_pos(&p, &root) {
+        Ok(i) => i,
+        Err(c) => return c,
+    };
+    match guard::status(&root, &id) {
+        Ok(s) => {
+            if p.has("--json") {
+                print_json(&s);
+            } else {
+                println!(
+                    "  {} {} — phase {}, verified {}, {}/{} command(s), {} out-of-scope",
+                    term::bold(&s.run_id),
+                    s.goal,
+                    s.phase,
+                    s.verified,
+                    s.commands_passed,
+                    s.commands_required,
+                    s.out_of_scope
+                );
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("{} {}", term::bold_red("error:"), e);
+            1
+        }
+    }
+}
+
+fn cmd_guard_context(rest: &[String]) -> i32 {
+    let p = parse(rest, &[]);
+    let root = cwd();
+    let id = match active_or_pos(&p, &root) {
+        Ok(i) => i,
+        Err(c) => return c,
+    };
+    match guard::context(&root, &id) {
+        Ok(ctx) => {
+            print_json(&ctx);
+            0
+        }
+        Err(e) => {
+            eprintln!("{} {}", term::bold_red("error:"), e);
+            1
+        }
+    }
+}
+
+fn cmd_guard_diff(rest: &[String]) -> i32 {
+    let p = parse(rest, &[]);
+    let root = cwd();
+    let id = match active_or_pos(&p, &root) {
+        Ok(i) => i,
+        Err(c) => return c,
+    };
+    match guard::diff(&root, &id) {
+        Ok(d) => {
+            if p.has("--json") {
+                print_json(&d);
+            } else {
+                for f in &d.in_scope {
+                    println!("  {} {}", term::green("✓"), f);
+                }
+                for f in &d.out_of_scope {
+                    println!("  {} {} (out of scope)", term::bold_red("✗"), f);
+                }
+                if d.added.is_empty() && d.modified.is_empty() && d.deleted.is_empty() {
+                    println!("  {} no changes since the baseline", term::dim("·"));
+                }
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("{} {}", term::bold_red("error:"), e);
+            1
+        }
+    }
+}
+
+fn cmd_guard_verify(rest: &[String]) -> i32 {
+    let p = parse(rest, &[]);
+    let root = cwd();
+    let id = match active_or_pos(&p, &root) {
+        Ok(i) => i,
+        Err(c) => return c,
+    };
+    match guard::verify(&root, &id, p.has("--rerun")) {
+        Ok(s) => {
+            if p.has("--json") {
+                print_json(&s);
+            } else if s.verified {
+                println!(
+                    "  {} verified — {}/{} command(s) passed, no out-of-scope writes",
+                    term::green("✓"),
+                    s.commands_passed,
+                    s.commands_required
+                );
+            } else {
+                println!(
+                    "  {} not verified — {}/{} command(s) passed, {} out-of-scope. See {}",
+                    term::bold_red("✗"),
+                    s.commands_passed,
+                    s.commands_required,
+                    s.out_of_scope,
+                    term::bold("tach guard context --json")
+                );
+            }
+            if s.verified {
+                0
+            } else {
+                1
+            }
+        }
+        Err(e) => {
+            eprintln!("{} {}", term::bold_red("error:"), e);
+            1
+        }
+    }
+}
+
+fn cmd_guard_commit(rest: &[String]) -> i32 {
+    let p = parse(rest, &[]);
+    let root = cwd();
+    let id = match active_or_pos(&p, &root) {
+        Ok(i) => i,
+        Err(c) => return c,
+    };
+    match guard::commit(&root, &id) {
+        Ok(out) => {
+            if p.has("--json") {
+                print_json(&out);
+            } else if out.ok {
+                println!(
+                    "  {} committed — run {} is {} (git untouched)",
+                    term::green("✓"),
+                    out.run_id,
+                    out.status
+                );
+            } else {
+                println!(
+                    "  {} commit refused — {}",
+                    term::bold_red("✗"),
+                    out.reason.clone().unwrap_or_default()
+                );
+            }
+            if out.ok {
+                store::clear_active_guard(&root);
+                0
+            } else {
+                1
+            }
+        }
+        Err(e) => {
+            eprintln!("{} {}", term::bold_red("error:"), e);
+            1
+        }
+    }
+}
+
+fn cmd_guard_abort(rest: &[String]) -> i32 {
+    let p = parse(rest, &[]);
+    let root = cwd();
+    let id = match active_or_pos(&p, &root) {
+        Ok(i) => i,
+        Err(c) => return c,
+    };
+    match guard::abort(&root, &id) {
+        Ok(out) => {
+            store::clear_active_guard(&root);
+            if p.has("--json") {
+                print_json(&out);
+            } else {
+                println!(
+                    "  {} aborted — run {} cancelled",
+                    term::dim("·"),
+                    out.run_id
+                );
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("{} {}", term::bold_red("error:"), e);
+            1
+        }
+    }
+}
+
+fn print_guard_help() {
+    println!("{}", term::bold("tach guard — coding-agent session"));
+    println!();
+    println!("  begin <Goal>     open a session over the working tree");
+    println!("  status [--json]  phase, verified bit, command counts");
+    println!("  context --json   the operating contract for the agent");
+    println!("  diff [--json]    changed files, classified by scope");
+    println!("  verify [--rerun] run required commands; set the verified bit");
+    println!("  commit           finalize verified changes into Tach's ledger");
+    println!("  abort            cancel the session");
 }
 
 /// `tach goal` with no subcommand: list the goals declared in this workspace.
@@ -1324,13 +1701,16 @@ fn cmd_goal_replay(rest: &[String]) -> i32 {
         Some(i) => i.clone(),
         None => {
             eprintln!(
-                "{} usage: tach goal replay <run-id>",
+                "{} usage: tach goal replay <run-id> [--rerun]",
                 term::bold_red("error:")
             );
             return 2;
         }
     };
-    match runtime::replay_run(&root, &id) {
+    // For a coding run, default replay re-derives the verdict from the recorded
+    // receipts (no command runs); `--rerun` actually re-executes the commands.
+    let rerun = p.has("--rerun");
+    match runtime::replay_run(&root, &id, rerun) {
         Ok(r) => {
             if r.identical {
                 println!(
@@ -1604,6 +1984,10 @@ fn print_goal_help() {
         "start a durable run (--strategy, --crash-after step:N)",
     );
     cmd(
+        "goal init <template>",
+        "write a Tachfile coding goal (e.g. coding.fix-tests)",
+    );
+    cmd(
         "goal check <name>",
         "statically validate a goal's plan before running it (--json)",
     );
@@ -1843,6 +2227,14 @@ fn print_help() {
     cmd(
         "new <name>",
         "scaffold a project (--clean for an empty one)",
+    );
+    cmd(
+        "init --existing",
+        "adopt an existing repo: write Tachfile, TACH_AGENT.md, .tachignore",
+    );
+    cmd(
+        "guard <sub>",
+        "coding-agent session: begin, status, context, diff, verify, commit, abort",
     );
     cmd(
         "check [file]",

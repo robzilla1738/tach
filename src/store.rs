@@ -39,7 +39,7 @@ pub struct GoalRecord {
 
 /// The mutable head of a run. Overwritten after every step (the events log is the
 /// immutable history; this is the latest summary).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct RunState {
     pub run_id: String,
     pub goal: String,
@@ -76,6 +76,32 @@ pub struct RunState {
     pub actions_executed: usize,
     #[serde(default)]
     pub receipts_created: usize,
+
+    // ----- Coding/guard-layer fields (defaulted for back-compat) -----
+    /// `""` for non-coding runs; for a `kind: "coding"` guard session one of
+    /// `open` | `verified` | `committed` | `aborted`. The cosmetic mirror of the
+    /// durable truth (baseline manifest + receipts + the last verify event).
+    #[serde(default)]
+    pub guard_phase: String,
+    /// How many of the goal's `require { command(...).passes }` commands there are.
+    #[serde(default)]
+    pub commands_required: usize,
+    /// How many of them passed (`exit_code == 0`) at the last `verify`.
+    #[serde(default)]
+    pub commands_passed: usize,
+    /// Count of changed files outside the goal's `fs.write` scope at the last gate.
+    #[serde(default)]
+    pub out_of_scope: usize,
+    /// The single bit an external agent must trust: every required command passed
+    /// and no out-of-scope writes were present at the last successful `verify`.
+    #[serde(default)]
+    pub verified: bool,
+    /// The tree digest (hash of the head manifest) that the last successful
+    /// `verify` validated. `commit` recomputes the digest and refuses if it has
+    /// changed — so edits made *after* a green verify can never be committed
+    /// unverified.
+    #[serde(default)]
+    pub verified_digest: String,
 }
 
 /// A workspace snapshot taken after a step, enough to resume from exactly here.
@@ -160,6 +186,17 @@ fn receipts_dir(repo: &Path, run_id: &str) -> PathBuf {
     run_dir(repo, run_id).join("receipts")
 }
 
+/// Where a coding (guard) run captures real command stdout/stderr. Distinct from
+/// receipts: a receipt is the durable proof an effect happened; an artifact is the
+/// raw, nondeterministic output bytes it points at.
+pub fn artifacts_dir(repo: &Path, run_id: &str) -> PathBuf {
+    run_dir(repo, run_id).join("artifacts")
+}
+
+fn baseline_path(repo: &Path, run_id: &str) -> PathBuf {
+    run_dir(repo, run_id).join("baseline.json")
+}
+
 pub fn events_path(repo: &Path, run_id: &str) -> PathBuf {
     run_dir(repo, run_id).join("events.jsonl")
 }
@@ -235,6 +272,22 @@ pub fn save_state(repo: &Path, state: &RunState) -> io::Result<()> {
 
 pub fn load_state(repo: &Path, run_id: &str) -> io::Result<RunState> {
     read_json(&state_path(repo, run_id))
+}
+
+/// Save the baseline manifest a coding run snapshots at `tach guard begin` — the
+/// repo-relative path -> content-hash map the scope/diff gate compares against.
+/// Kept separate from `goal.json` so a real repo's baseline (hashes only) never
+/// bloats the goal record the way `base_files` (full source) would.
+pub fn save_baseline(
+    repo: &Path,
+    run_id: &str,
+    manifest: &BTreeMap<String, String>,
+) -> io::Result<()> {
+    write_json(&baseline_path(repo, run_id), manifest)
+}
+
+pub fn load_baseline(repo: &Path, run_id: &str) -> io::Result<BTreeMap<String, String>> {
+    read_json(&baseline_path(repo, run_id))
 }
 
 pub fn save_checkpoint(repo: &Path, run_id: &str, cp: &Checkpoint) -> io::Result<()> {
@@ -335,6 +388,37 @@ where
     }
     items.sort_by_key(&key);
     items
+}
+
+// ----- Active guard session pointer -----
+//
+// A guard session spans many CLI calls (`begin`, then repeated `verify`, then
+// `commit`). So the agent need not thread a run id through every command, the
+// active run id is remembered in one small file; the CLI falls back to it when no
+// id is given. It is a convenience pointer only — the per-run directory remains
+// the durable truth.
+
+fn active_guard_path(repo: &Path) -> PathBuf {
+    repo.join(".tach").join("guard-active")
+}
+
+pub fn set_active_guard(repo: &Path, run_id: &str) -> io::Result<()> {
+    let path = active_guard_path(repo);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, run_id)
+}
+
+pub fn active_guard(repo: &Path) -> Option<String> {
+    fs::read_to_string(active_guard_path(repo))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+pub fn clear_active_guard(repo: &Path) {
+    let _ = fs::remove_file(active_guard_path(repo));
 }
 
 /// Every run id present in the store, sorted.

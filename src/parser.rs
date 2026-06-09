@@ -401,8 +401,32 @@ impl Parser {
         while !matches!(self.peek(), Tok::RBrace | Tok::Eof) {
             let before = self.pos;
             let (name, sp) = self.parse_dotted_name();
-            r.span = r.span.to(sp);
-            r.conditions.push(RequireCond { name, span: sp });
+            let mut arg = None;
+            let mut pred = None;
+            let mut end = sp;
+            // The parameterized form `command("cargo test").passes`. A bare
+            // predicate (no `(`) keeps `arg`/`pred` as `None`.
+            if name == "command" && matches!(self.peek(), Tok::LParen) {
+                self.bump();
+                if let Tok::Str(s) = self.peek().clone() {
+                    self.bump();
+                    arg = Some(s);
+                } else {
+                    self.error_here("expected a command string, e.g. command(\"cargo test\")");
+                }
+                self.expect(Tok::RParen);
+                self.expect(Tok::Dot);
+                let (p, psp) = self.expect_ident();
+                pred = Some(p);
+                end = psp;
+            }
+            r.span = r.span.to(end);
+            r.conditions.push(RequireCond {
+                name,
+                arg,
+                pred,
+                span: sp.to(end),
+            });
             if self.pos == before {
                 self.bump();
             }
@@ -1422,6 +1446,48 @@ fn describe(p: Parity) -> String {
         assert_eq!(g.require.conditions.len(), 2);
         assert_eq!(g.require.conditions[0].name, "tests.pass");
         assert!(g.plan.is_none(), "a repair goal has no plan block");
+    }
+
+    #[test]
+    fn parses_a_coding_goal_command_require() {
+        let src = r#"goal FixFailingTests -> Success {
+  budget {
+    steps: 40
+  }
+  allow {
+    fs.write ["src/**", "tests/**"]
+    shell.run ["cargo test"]
+  }
+  require {
+    command("cargo test").passes
+    no_out_of_scope_writes
+  }
+}
+"#;
+        let (module, diags) = parse("Tachfile", src);
+        let errs: Vec<_> = diags.iter().filter(|d| d.is_error()).collect();
+        assert!(errs.is_empty(), "unexpected parse errors: {:?}", errs);
+        let g = module
+            .items
+            .iter()
+            .find_map(|i| match i {
+                Item::Goal(g) => Some(g),
+                _ => None,
+            })
+            .expect("goal parsed");
+        assert_eq!(g.require.conditions.len(), 2);
+        let cmd = &g.require.conditions[0];
+        assert_eq!(cmd.name, "command");
+        assert_eq!(cmd.arg.as_deref(), Some("cargo test"));
+        assert_eq!(cmd.pred.as_deref(), Some("passes"));
+        assert_eq!(g.require.conditions[1].name, "no_out_of_scope_writes");
+
+        // The resolved spec flattens the command form to `command:<cmd>`.
+        let spec = crate::goal::GoalSpec::from_decl(g);
+        assert_eq!(spec.required_commands(), vec!["cargo test"]);
+        assert!(spec.requires_no_out_of_scope());
+        assert!(spec.command_allowed("cargo test"));
+        assert!(!spec.command_allowed("cargo build"));
     }
 
     #[test]

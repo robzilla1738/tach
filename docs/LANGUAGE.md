@@ -173,10 +173,17 @@ goal FixFailingTests -> Success {
 The `allow` block is **authority**, not documentation. A patch that would write outside the
 `fs.write` globs, or perform an effect the goal never granted, is rejected by the same
 verification pipeline that runs the tests — before it touches disk. The success conditions
-the runtime understands are `tests.pass`, `no_new_effects`, `no_forbidden_effects`, and
-`check.clean`; naming any other condition is a warning, since the goal could never be
-satisfied. A goal with no `steps` or `retries` budget is also flagged — long-horizon runs
-must be bounded.
+the runtime understands are `tests.pass`, `no_new_effects`, `no_forbidden_effects`,
+`check.clean`, and — for the coding harness — `no_out_of_scope_writes` and the parameterized
+`command("cargo test").passes` (each `shell.run` command a run must prove). Naming any other
+condition is a warning, since the goal could never be satisfied. A goal with no `steps` or
+`retries` budget is also flagged — long-horizon runs must be bounded.
+
+The same grammar drives the **coding harness** over an existing repo: a `Tachfile` at the
+repo root holds a goal whose `shell.run` is a real command and whose `require` is
+`command("…").passes`. `tach init --existing` writes one, and `tach guard begin/verify/commit`
+runs it against the live working tree — scoping edits, executing the command for real, and
+proving the result with a receipt. See the README's coding-harness section.
 
 Runs are durable: every step appends an immutable event to
 `.tach/goals/<run_id>/events.jsonl` and writes a checkpoint, so `tach goal resume` can

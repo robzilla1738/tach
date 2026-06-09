@@ -77,7 +77,13 @@ impl GoalSpec {
                 .require
                 .conditions
                 .iter()
-                .map(|c| c.name.clone())
+                .map(|c| match &c.arg {
+                    // `command("cargo test").passes` serializes to `command:cargo test`
+                    // so the runtime-facing `Vec<String>` stays flat (no goal.json
+                    // schema change) while preserving the command argument.
+                    Some(arg) => format!("command:{arg}"),
+                    None => c.name.clone(),
+                })
                 .collect(),
         }
     }
@@ -110,6 +116,33 @@ impl GoalSpec {
 
     pub fn requires_tests_pass(&self) -> bool {
         self.require.iter().any(|c| c == "tests.pass")
+    }
+
+    /// The exact commands a coding goal grants for execution (`allow { shell.run
+    /// [...] }`). Unlike file scopes, shell commands are matched by exact string —
+    /// a command runs only if it appears here verbatim.
+    pub fn allowed_commands(&self) -> &[String] {
+        &self.allow.shell
+    }
+
+    /// Is `cmd` exactly one of the allowlisted commands? No globbing: `cargo *`
+    /// would defeat the point of an allowlist.
+    pub fn command_allowed(&self, cmd: &str) -> bool {
+        self.allow.shell.iter().any(|c| c == cmd)
+    }
+
+    /// The commands a coding goal *requires* to pass, taken from the serialized
+    /// `require { command("…").passes }` conditions (stored as `command:<cmd>`).
+    pub fn required_commands(&self) -> Vec<String> {
+        self.require
+            .iter()
+            .filter_map(|c| c.strip_prefix("command:").map(|s| s.to_string()))
+            .collect()
+    }
+
+    /// Does the goal require that no edit fall outside its `fs.write` scope?
+    pub fn requires_no_out_of_scope(&self) -> bool {
+        self.require.iter().any(|c| c == "no_out_of_scope_writes")
     }
 
     /// The exact set of tools this goal is authorized to call. Always a concrete

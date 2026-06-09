@@ -1,4 +1,4 @@
-//! The Tach checker: type and effect analysis.
+//! The Perdure checker: type and effect analysis.
 //!
 //! Every error it produces is *agent-shaped*. It does not merely say "this is
 //! wrong" — it attaches a `preferred_patch` (a byte-span replacement) that, when
@@ -183,7 +183,7 @@ fn check_goal(g: &GoalDecl, unit: &Unit, diags: &mut Vec<Diagnostic>) {
 
 /// Validate a single named goal — its require/budget and, if present, its plan
 /// body. Returns `None` if the program has no goal by that name. Powers
-/// `tach goal check <name>`.
+/// `perdure goal check <name>`.
 pub fn check_named_goal(program: &Program, name: &str) -> Option<Vec<Diagnostic>> {
     for unit in &program.units {
         for item in &unit.module.items {
@@ -1507,7 +1507,7 @@ fn session_summary(s: Session) -> String {
 
     #[test]
     fn finds_the_three_planted_bugs() {
-        let (prog, _) = Program::parse_sources(vec![SourceFile::new("auth.tach", BROKEN)]);
+        let (prog, _) = Program::parse_sources(vec![SourceFile::new("auth.pdr", BROKEN)]);
         let diags = check_program(&prog);
         let errors: Vec<_> = diags.iter().filter(|d| d.is_error()).collect();
         let kinds: BTreeSet<&str> = errors.iter().map(|d| d.kind.as_str()).collect();
@@ -1551,7 +1551,7 @@ fn summary(s: Session) -> Int {
 
     #[test]
     fn unknown_field_suggests_nearest() {
-        let (prog, _) = Program::parse_sources(vec![SourceFile::new("f.tach", FIELD_TYPO)]);
+        let (prog, _) = Program::parse_sources(vec![SourceFile::new("f.pdr", FIELD_TYPO)]);
         let diags = check_program(&prog);
         let errors: Vec<_> = diags.iter().filter(|d| d.is_error()).collect();
         let uf = errors
@@ -1579,7 +1579,7 @@ fn summary(s: Session) -> Int {
 
     #[test]
     fn unknown_field_does_not_guess_wildly() {
-        let (prog, _) = Program::parse_sources(vec![SourceFile::new("f.tach", FIELD_FAR)]);
+        let (prog, _) = Program::parse_sources(vec![SourceFile::new("f.pdr", FIELD_FAR)]);
         let diags = check_program(&prog);
         let uf = diags
             .iter()
@@ -1595,7 +1595,7 @@ fn summary(s: Session) -> Int {
     fn known_record_with_unknown_receiver_is_lenient() {
         // `row` comes from db.query, whose row type is Unknown — accessing fields
         // on it must NOT produce a false positive (the demo relies on this).
-        let (prog, _) = Program::parse_sources(vec![SourceFile::new("auth.tach", BROKEN)]);
+        let (prog, _) = Program::parse_sources(vec![SourceFile::new("auth.pdr", BROKEN)]);
         let diags = check_program(&prog);
         assert!(
             !diags.iter().any(|d| d.kind == "unknown_field"),
@@ -1608,7 +1608,7 @@ fn summary(s: Session) -> Int {
 
     #[test]
     fn unused_import_is_removed() {
-        let (prog, _) = Program::parse_sources(vec![SourceFile::new("m.tach", UNUSED_IMPORT)]);
+        let (prog, _) = Program::parse_sources(vec![SourceFile::new("m.pdr", UNUSED_IMPORT)]);
         let diags = check_program(&prog);
         let d = diags
             .iter()
@@ -1634,7 +1634,7 @@ fn compute(x: Int) -> Int {
 
     #[test]
     fn unused_variable_gets_underscore() {
-        let (prog, _) = Program::parse_sources(vec![SourceFile::new("m.tach", UNUSED_VAR)]);
+        let (prog, _) = Program::parse_sources(vec![SourceFile::new("m.pdr", UNUSED_VAR)]);
         let diags = check_program(&prog);
         let d = diags
             .iter()
@@ -1651,7 +1651,7 @@ fn compute(x: Int) -> Int {
 
     #[test]
     fn non_exhaustive_match_inserts_missing_arm() {
-        let (prog, _) = Program::parse_sources(vec![SourceFile::new("m.tach", NON_EXHAUSTIVE)]);
+        let (prog, _) = Program::parse_sources(vec![SourceFile::new("m.pdr", NON_EXHAUSTIVE)]);
         let diags = check_program(&prog);
         let d = diags
             .iter()
@@ -1671,7 +1671,7 @@ fn compute(x: Int) -> Int {
 
     #[test]
     fn unknown_variant_suggests_nearest() {
-        let (prog, _) = Program::parse_sources(vec![SourceFile::new("m.tach", TYPO_VARIANT)]);
+        let (prog, _) = Program::parse_sources(vec![SourceFile::new("m.pdr", TYPO_VARIANT)]);
         let diags = check_program(&prog);
         let d = diags
             .iter()
@@ -1688,7 +1688,7 @@ fn compute(x: Int) -> Int {
     #[test]
     fn exhaustive_match_is_clean() {
         const OK: &str = "type Signal = Stop | Go\n\nfn allow(s: Signal) -> Bool {\n  return match s {\n    Stop => false\n    Go => true\n  }\n}\n";
-        let (prog, _) = Program::parse_sources(vec![SourceFile::new("m.tach", OK)]);
+        let (prog, _) = Program::parse_sources(vec![SourceFile::new("m.pdr", OK)]);
         let diags = check_program(&prog);
         assert!(
             !diags
@@ -1709,7 +1709,7 @@ fn compute(x: Int) -> Int {
   return y
 }
 "#;
-        let (prog, _) = Program::parse_sources(vec![SourceFile::new("m.tach", OK)]);
+        let (prog, _) = Program::parse_sources(vec![SourceFile::new("m.pdr", OK)]);
         let diags = check_program(&prog);
         assert!(
             !diags.iter().any(|d| d.kind == "unused_variable"),
@@ -1718,10 +1718,10 @@ fn compute(x: Int) -> Int {
         );
     }
 
-    // ----- plan-goal checker (`tach goal check`) -----
+    // ----- plan-goal checker (`perdure goal check`) -----
 
     fn plan_diag_kinds(src: &str) -> Vec<String> {
-        let (prog, pd) = Program::parse_sources(vec![SourceFile::new("g.tach", src)]);
+        let (prog, pd) = Program::parse_sources(vec![SourceFile::new("g.pdr", src)]);
         assert!(pd.iter().all(|d| !d.is_error()), "parse errors: {pd:?}");
         check_program(&prog)
             .iter()
@@ -1780,7 +1780,7 @@ fn compute(x: Int) -> Int {
   allow { fake.stripe.refundd }
   plan { call fake.stripe.refundd { charge_id: "c" } }
 }"#;
-        let (prog, _) = Program::parse_sources(vec![SourceFile::new("g.tach", src)]);
+        let (prog, _) = Program::parse_sources(vec![SourceFile::new("g.pdr", src)]);
         let diags = check_program(&prog);
         let unknown = diags
             .iter()

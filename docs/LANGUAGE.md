@@ -1,8 +1,8 @@
-# The Tach language (v0)
+# The Perdure language (v0)
 
-Tach is intentionally small and unambiguous. The guiding rule: **there should be one
+Perdure is intentionally small and unambiguous. The guiding rule: **there should be one
 obvious way to write a thing.** Fewer valid spellings of the same idea means an agent
-editing Tach has fewer ways to produce something that parses but means the wrong thing.
+editing Perdure has fewer ways to produce something that parses but means the wrong thing.
 
 ## Lexical structure
 
@@ -19,7 +19,7 @@ A file is a sequence of items.
 
 ### `import`
 
-```tach
+```perdure
 import db
 ```
 
@@ -28,7 +28,7 @@ Brings a builtin module into scope. Using a module without importing it is an er
 
 ### `type`
 
-```tach
+```perdure
 type Session = {
   token: String
   user_id: Int
@@ -41,7 +41,7 @@ Record types. Field types may themselves be records, named types, or generics li
 
 A `type` can also declare a **sum type** — a set of payload-less variants joined by `|`:
 
-```tach
+```perdure
 type Parity = Even | Odd
 ```
 
@@ -50,7 +50,7 @@ Each variant is a value of that type (`Even`, `Odd`), variants compare with `==`
 
 ### `fn`
 
-```tach
+```perdure
 fn load_session(token: String) -> Result<Session, AuthError>
   effects [db.read, time.read]
 {
@@ -65,14 +65,14 @@ fn load_session(token: String) -> Result<Session, AuthError>
 
 ### `test`
 
-```tach
+```perdure
 test "expired session is rejected" {
   db.seed("old", { token: "old", user_id: 7, expires_at: 1 })
   ensure load_session("old").is_err()
 }
 ```
 
-A named block run by `tach test`. A test passes if it completes without a failing
+A named block run by `perdure test`. A test passes if it completes without a failing
 `ensure` or an uncaught error.
 
 ## Statements
@@ -103,7 +103,7 @@ function — the same propagation you know from Rust.
 A `match` selects an arm by the scrutinee's variant; `_` is a catch-all. Each arm is
 `pattern => expression`, and the `match` evaluates to the chosen arm's value:
 
-```tach
+```perdure
 fn describe(p: Parity) -> String {
   return match p {
     Even => "even"
@@ -143,7 +143,7 @@ Value methods that don't need an import: `.is_ok()`, `.is_err()`, `.unwrap()`,
 ## Determinism
 
 The interpreter has a fixed clock, no randomness, and no real I/O. Every run is
-reproducible — which is what lets `tach replay` re-execute a recorded agent loop and get
+reproducible — which is what lets `perdure replay` re-execute a recorded agent loop and get
 byte-identical results, and what makes the agent-loop metrics trustworthy.
 
 ## Goals
@@ -151,9 +151,9 @@ byte-identical results, and what makes the agent-loop metrics trustworthy.
 A `goal` is a top-level declaration that turns the repair loop into a durable,
 authority-scoped run. It is declarative: it states the budget a run may spend, the
 authority it is granted, and the conditions required for success. The runtime
-(`tach goal run`) supplies the loop.
+(`perdure goal run`) supplies the loop.
 
-```tach
+```perdure
 goal FixFailingTests -> Success {
   budget {
     steps: 30        // hard cap on repair steps (enforced)
@@ -167,7 +167,7 @@ goal FixFailingTests -> Success {
     fs.read "."                 // a single glob, bare
     fs.write ["src/**", "tests/**"]   // or a list
     shell.run ["cargo test", "bun test"]
-    tach.check                  // a bare dotted name is a tool grant
+    perdure.check                  // a bare dotted name is a tool grant
   }
   require {
     tests.pass                  // success conditions the runtime can evaluate
@@ -185,16 +185,16 @@ the runtime understands are `tests.pass`, `no_new_effects`, `no_forbidden_effect
 condition is a warning, since the goal could never be satisfied. A goal with no `steps` or
 `retries` budget is also flagged — long-horizon runs must be bounded.
 
-The same grammar drives the **coding harness** over an existing repo: a `Tachfile` at the
+The same grammar drives the **coding harness** over an existing repo: a `Perdurefile` at the
 repo root holds a goal whose `shell.run` is a real command and whose `require` is
-`command("…").passes`. `tach init --existing` writes one, and `tach guard begin/verify/commit`
+`command("…").passes`. `perdure init --existing` writes one, and `perdure guard begin/verify/commit`
 runs it against the live working tree — scoping edits, executing the command for real, and
 proving the result with a receipt. See the README's coding-harness section.
 
 Runs are durable: every step appends an immutable event to
-`.tach/goals/<run_id>/events.jsonl` and writes a checkpoint, so `tach goal resume` can
+`.perdure/goals/<run_id>/events.jsonl` and writes a checkpoint, so `perdure goal resume` can
 recover a crashed run from exactly where it stopped without repeating work, and
-`tach goal replay` reproduces it byte-for-byte. See the architecture notes for the full
+`perdure goal replay` reproduces it byte-for-byte. See the architecture notes for the full
 model.
 
 ### Plan goals (workflows)
@@ -204,7 +204,7 @@ A goal may carry a `plan { ... }` block instead of leaning on the repair loop. A
 human approval gates, and branches and loops over what those tools return. It is the general form
 of the action layer.
 
-```tach
+```perdure
 goal ReconcileChargebacks -> Success {
   budget { steps: 60 }                       // budget bounds the number of tool calls
   allow {
@@ -239,7 +239,7 @@ Plan statements:
 | `let x = <expr>` | bind (or rebind) a name in the plan's single, flat scope |
 | `let x = call <tool> { k: v, … }` | call a tool and bind its output (a JSON value) |
 | `call <tool> { k: v, … }` | call a tool, discarding the output |
-| `approve "summary" { … }` | human approval gate — the body runs only once `tach goal approve` grants it |
+| `approve "summary" { … }` | human approval gate — the body runs only once `perdure goal approve` grants it |
 | `if <cond> { … } else { … }` | branch on a boolean (`else` optional; no truthiness coercion) |
 | `for <x> in <list-expr> { … }` | iterate a JSON array (typically a tool's output) |
 | `while <cond> { … }` | repeat while a boolean holds (bounded by the budget) |
@@ -252,15 +252,15 @@ Every tool `call` produces a durable **receipt**, and the plan runs by **re-exec
 and a resume both walk the plan from the top, and a call whose receipt already exists returns its
 recorded output without invoking the tool again. That one rule is what makes loops crash-safe. A
 refund inside a loop, crashed the instant after it commits, is replayed for free on the next
-resume and never issued twice. Drive the gates with `tach goal approvals`/`approve`/`deny`, list
-the effects with `tach goal receipts`, and prove a run reproduces with `tach goal replay`. Two
+resume and never issued twice. Drive the gates with `perdure goal approvals`/`approve`/`deny`, list
+the effects with `perdure goal receipts`, and prove a run reproduces with `perdure goal replay`. Two
 plan goals ship built-in: `ReconcileChargebacks` (a `for` loop with a per-duplicate refund gate)
 and `RetryFlakyDeploy` (a `while` retry loop). See the architecture notes for the durable
 interpreter and its exactly-once invariant.
 
 You can also author a plan goal in your own workspace and run it the same way — nothing about it
-is built-in. `tach new demo --goal chargebacks` scaffolds a `goal.tach` you own, and
-`tach goal check <name>` validates the plan before you run it: it reports a `call` to a tool the
+is built-in. `perdure new demo --goal chargebacks` scaffolds a `goal.pdr` you own, and
+`perdure goal check <name>` validates the plan before you run it: it reports a `call` to a tool the
 `allow` block doesn't grant (`E0433`), an unknown tool (`E0434`, with a did-you-mean), a variable
 that is never bound (`E0435`), an expression form a plan can't evaluate (`E0436`), and a `while`
 loop that makes no tool call and so can only spin against the iteration limit (`E0437`). When a
@@ -269,10 +269,10 @@ frozen snapshot, never the live file, so editing the source mid-run can't change
 
 ## Formatting
 
-There is **one formatter**. `tach fmt` renders any file to a single canonical style
+There is **one formatter**. `perdure fmt` renders any file to a single canonical style
 (2-space indent, multi-line records and `match` arms, canonical spacing); it is
 deterministic and idempotent, and only parenthesizes a subexpression when dropping the
-parens would change the parse. `tach fmt --check` writes nothing and exits non-zero if
+parens would change the parse. `perdure fmt --check` writes nothing and exits non-zero if
 anything would change — the CI gate. The formatter never reformats a file it can't render
 losslessly: files with syntax errors or comments are left untouched (comment-preserving
 formatting is a planned follow-up).
@@ -300,7 +300,7 @@ formatting is a planned follow-up).
 | `E0436` | `unsupported_plan_expr` | use a form a plan expression can evaluate |
 | `E0437` | `unbounded_plan_loop` (warning) | call a tool inside the loop so it makes progress |
 
-The mechanical code diagnostics each carry a `preferred_patch` so `tach fix` can apply them
+The mechanical code diagnostics each carry a `preferred_patch` so `perdure fix` can apply them
 without guessing. The
 did-you-mean diagnostics only suggest a rename when a real name is a small edit away —
 they never guess wildly, because an agent would dutifully apply a bad rename.

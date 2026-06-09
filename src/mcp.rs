@@ -1,12 +1,12 @@
-//! `tach serve-mcp` — a SERVER-ONLY Model Context Protocol front door.
+//! `perdure serve-mcp` — a SERVER-ONLY Model Context Protocol front door.
 //!
-//! Exposes Tach's *existing* safe guard/goal operations as MCP tools over stdio, so
+//! Exposes Perdure's *existing* safe guard/goal operations as MCP tools over stdio, so
 //! an external coding agent (Claude Code, Codex, Cursor-style, local) can drive a
 //! guarded repo through structured tool calls instead of shelling out. This is a
 //! server only: it never acts as an MCP client, never runs arbitrary shell, and never
-//! writes arbitrary files. Every tool maps to a command Tach already vets — the scope
+//! writes arbitrary files. Every tool maps to a command Perdure already vets — the scope
 //! gate, the receipt ledger, and the verify path are unchanged. The agent still makes
-//! the edits with its own tools; Tach remains the guardrail and the ledger.
+//! the edits with its own tools; Perdure remains the guardrail and the ledger.
 //!
 //! Transport: newline-delimited JSON-RPC 2.0 on stdin/stdout (the MCP stdio
 //! transport). One JSON object per line; a request without an `id` is a notification
@@ -77,19 +77,19 @@ fn initialize(params: &Value) -> Value {
         "protocolVersion": pv,
         "capabilities": { "tools": { "listChanged": false } },
         "serverInfo": {
-            "name": "tach",
-            "title": "Tach guard",
+            "name": "perdure",
+            "title": "Perdure guard",
             "version": env!("CARGO_PKG_VERSION"),
         },
         "instructions": "Operate a guarded repo from the outside: begin a session, read \
-            context/next, make edits with your own tools, verify, then finalize. Tach is the \
+            context/next, make edits with your own tools, verify, then finalize. Perdure is the \
             guardrail and the ledger — it never runs arbitrary shell or writes files for you.",
     })
 }
 
 // ----- tools -----
 
-/// The tool catalog. Server-only and safe: guard/goal operations Tach already vets.
+/// The tool catalog. Server-only and safe: guard/goal operations Perdure already vets.
 /// No raw shell execution and no arbitrary file writes are exposed.
 fn tool_list() -> Vec<Value> {
     let run_id =
@@ -108,67 +108,67 @@ fn tool_list() -> Vec<Value> {
     };
     vec![
         tool(
-            "tach_guard_begin",
+            "perdure_guard_begin",
             "Open a guard session over the working tree and return the generic agent context. Mutates: records a new run and a baseline snapshot.",
-            json!({ "goal": { "type": "string", "description": "Goal name from the Tachfile; defaults to the sole goal." } }),
+            json!({ "goal": { "type": "string", "description": "Goal name from the Perdurefile; defaults to the sole goal." } }),
             json!([]),
         ),
         tool(
-            "tach_guard_status",
+            "perdure_guard_status",
             "The compact session status (phase, verified bit, command counts). Read-only.",
             json!({ "run_id": run_id }),
             json!([]),
         ),
         tool(
-            "tach_guard_context",
+            "perdure_guard_context",
             "The operating contract for a session. With for_agent=generic, the full agent context (allowed files/commands, changes, receipts, next action). Read-only.",
             json!({ "run_id": run_id, "for_agent": { "type": "string", "enum": ["generic"], "description": "Render the full generic agent context." } }),
             json!([]),
         ),
         tool(
-            "tach_guard_next",
+            "perdure_guard_next",
             "The single next required action for the agent (what to do now, and the exact next command). Read-only.",
             json!({ "run_id": run_id }),
             json!([]),
         ),
         tool(
-            "tach_guard_diff",
+            "perdure_guard_diff",
             "The changed files since the baseline, classified in/out of the write scope. Read-only.",
             json!({ "run_id": run_id }),
             json!([]),
         ),
         tool(
-            "tach_guard_verify",
+            "perdure_guard_verify",
             "Run the goal's required commands and set the verified bit; on refusal, returns machine-actionable repair hints. Mutates: executes the allowlisted commands and mints receipts.",
             json!({ "run_id": run_id, "rerun": { "type": "boolean", "description": "Force a fresh run even if a receipt for the unchanged tree exists." } }),
             json!([]),
         ),
         tool(
-            "tach_guard_finalize",
-            "Finalize a verified session into Tach's ledger. LEDGER-ONLY: never creates a git commit or touches git. Mutates: marks the run completed.",
+            "perdure_guard_finalize",
+            "Finalize a verified session into Perdure's ledger. LEDGER-ONLY: never creates a git commit or touches git. Mutates: marks the run completed.",
             json!({ "run_id": run_id }),
             json!([]),
         ),
         tool(
-            "tach_guard_abort",
+            "perdure_guard_abort",
             "Cancel a guard session. Mutates: marks the run cancelled.",
             json!({ "run_id": run_id }),
             json!([]),
         ),
         tool(
-            "tach_goal_inspect",
+            "perdure_goal_inspect",
             "The goal spec, run state, and full event history for a run. Read-only.",
             json!({ "run_id": run_id }),
             json!([]),
         ),
         tool(
-            "tach_goal_replay",
+            "perdure_goal_replay",
             "Replay a recorded run and report whether it reproduces. Read-only by default; rerun=true re-executes the required commands.",
             json!({ "run_id": run_id, "rerun": { "type": "boolean", "description": "Re-execute the commands instead of re-deriving from receipts." } }),
             json!([]),
         ),
         tool(
-            "tach_goal_receipts",
+            "perdure_goal_receipts",
             "The durable command receipts minted by a run. Read-only.",
             json!({ "run_id": run_id }),
             json!([]),
@@ -199,14 +199,14 @@ fn call_tool(repo: &Path, params: &Value) -> Result<Value, (i64, String)> {
 /// error message surfaced as an `isError` tool result.
 fn dispatch(repo: &Path, name: &str, args: &Value) -> Option<Result<Value, String>> {
     match name {
-        "tach_guard_begin" => Some((|| {
+        "perdure_guard_begin" => Some((|| {
             let goal = args.get("goal").and_then(|v| v.as_str());
             let st = guard::begin(repo, goal).map_err(|e| e.to_string())?;
             let _ = store::set_active_guard(repo, &st.run_id);
             jv(guard::agent_context(repo, &st.run_id, "generic"))
         })()),
-        "tach_guard_status" => Some((|| jv(guard::status(repo, &arg_run_id(repo, args)?)))()),
-        "tach_guard_context" => Some((|| {
+        "perdure_guard_status" => Some((|| jv(guard::status(repo, &arg_run_id(repo, args)?)))()),
+        "perdure_guard_context" => Some((|| {
             let rid = arg_run_id(repo, args)?;
             match args.get("for_agent").and_then(|v| v.as_str()) {
                 Some("generic") => jv(guard::agent_context(repo, &rid, "generic")),
@@ -214,14 +214,14 @@ fn dispatch(repo: &Path, name: &str, args: &Value) -> Option<Result<Value, Strin
                 None => jv(guard::context(repo, &rid)),
             }
         })()),
-        "tach_guard_next" => Some((|| jv(guard::next(repo, &arg_run_id(repo, args)?)))()),
-        "tach_guard_diff" => Some((|| jv(guard::diff(repo, &arg_run_id(repo, args)?)))()),
-        "tach_guard_verify" => Some((|| {
+        "perdure_guard_next" => Some((|| jv(guard::next(repo, &arg_run_id(repo, args)?)))()),
+        "perdure_guard_diff" => Some((|| jv(guard::diff(repo, &arg_run_id(repo, args)?)))()),
+        "perdure_guard_verify" => Some((|| {
             let rid = arg_run_id(repo, args)?;
             let rerun = args.get("rerun").and_then(|v| v.as_bool()).unwrap_or(false);
             jv(guard::verify_report(repo, &rid, rerun))
         })()),
-        "tach_guard_finalize" => Some((|| {
+        "perdure_guard_finalize" => Some((|| {
             let rid = arg_run_id(repo, args)?;
             let out = guard::commit(repo, &rid).map_err(|e| e.to_string())?;
             if out.ok {
@@ -229,20 +229,20 @@ fn dispatch(repo: &Path, name: &str, args: &Value) -> Option<Result<Value, Strin
             }
             jv::<guard::GuardOutcome>(Ok(out))
         })()),
-        "tach_guard_abort" => Some((|| {
+        "perdure_guard_abort" => Some((|| {
             let rid = arg_run_id(repo, args)?;
             let out = guard::abort(repo, &rid).map_err(|e| e.to_string())?;
             store::clear_active_guard(repo);
             jv::<guard::GuardOutcome>(Ok(out))
         })()),
-        "tach_goal_inspect" => Some((|| {
+        "perdure_goal_inspect" => Some((|| {
             let rid = arg_run_id(repo, args)?;
             let state = store::load_state(repo, &rid).map_err(|_| format!("no run `{rid}`"))?;
             let events = event::read_all(&store::events_path(repo, &rid)).unwrap_or_default();
             let goal = store::load_goal(repo, &rid).ok().map(|r| r.spec);
             Ok(json!({ "goal": goal, "state": state, "events": events }))
         })()),
-        "tach_goal_replay" => Some((|| {
+        "perdure_goal_replay" => Some((|| {
             let rid = arg_run_id(repo, args)?;
             let rerun = args.get("rerun").and_then(|v| v.as_bool()).unwrap_or(false);
             let r = runtime::replay_run(repo, &rid, rerun).map_err(|e| e.to_string())?;
@@ -253,7 +253,7 @@ fn dispatch(repo: &Path, name: &str, args: &Value) -> Option<Result<Value, Strin
                 "steps": r.steps,
             }))
         })()),
-        "tach_goal_receipts" => Some((|| {
+        "perdure_goal_receipts" => Some((|| {
             let rid = arg_run_id(repo, args)?;
             Ok(serde_json::to_value(store::list_receipts(repo, &rid)).unwrap_or(Value::Null))
         })()),
@@ -316,13 +316,13 @@ mod tests {
             static N: AtomicU64 = AtomicU64::new(0);
             let n = N.fetch_add(1, Ordering::Relaxed);
             let dir =
-                std::env::temp_dir().join(format!("tach_mcp_{}_{}_{}", std::process::id(), tag, n));
+                std::env::temp_dir().join(format!("perdure_mcp_{}_{}_{}", std::process::id(), tag, n));
             let _ = fs::remove_dir_all(&dir);
             fs::create_dir_all(&dir).unwrap();
             // A repo whose check passes iff src/lib.rs has FIXED.
             fs::write(dir.join("Cargo.toml"), "[package]\nname=\"x\"\n").unwrap();
             fs::write(
-                dir.join("Tachfile"),
+                dir.join("Perdurefile"),
                 crate::adopt::coding_goal_source(
                     "FixFailingTests",
                     "sh check.sh",
@@ -372,7 +372,7 @@ mod tests {
             json!({ "protocolVersion": "2025-06-18" }),
         );
         assert_eq!(init["result"]["protocolVersion"], json!("2025-06-18"));
-        assert_eq!(init["result"]["serverInfo"]["name"], json!("tach"));
+        assert_eq!(init["result"]["serverInfo"]["name"], json!("perdure"));
 
         let list = call(r.path(), 2, "tools/list", json!({}));
         let names: Vec<&str> = list["result"]["tools"]
@@ -382,17 +382,17 @@ mod tests {
             .map(|t| t["name"].as_str().unwrap())
             .collect();
         for must in [
-            "tach_guard_begin",
-            "tach_guard_status",
-            "tach_guard_context",
-            "tach_guard_next",
-            "tach_guard_diff",
-            "tach_guard_verify",
-            "tach_guard_finalize",
-            "tach_guard_abort",
-            "tach_goal_inspect",
-            "tach_goal_replay",
-            "tach_goal_receipts",
+            "perdure_guard_begin",
+            "perdure_guard_status",
+            "perdure_guard_context",
+            "perdure_guard_next",
+            "perdure_guard_diff",
+            "perdure_guard_verify",
+            "perdure_guard_finalize",
+            "perdure_guard_abort",
+            "perdure_goal_inspect",
+            "perdure_goal_replay",
+            "perdure_goal_receipts",
         ] {
             assert!(names.contains(&must), "missing tool {must}");
         }
@@ -419,7 +419,7 @@ mod tests {
             r.path(),
             10,
             "tools/call",
-            json!({ "name": "tach_guard_begin", "arguments": { "goal": "FixFailingTests" } }),
+            json!({ "name": "perdure_guard_begin", "arguments": { "goal": "FixFailingTests" } }),
         ));
         let run_id = begun["run_id"].as_str().unwrap().to_string();
         assert_eq!(begun["agent"], json!("generic"));
@@ -429,7 +429,7 @@ mod tests {
             r.path(),
             11,
             "tools/call",
-            json!({ "name": "tach_guard_next", "arguments": {} }),
+            json!({ "name": "perdure_guard_next", "arguments": {} }),
         ));
         assert!(next["next_action"].is_string());
 
@@ -438,7 +438,7 @@ mod tests {
             r.path(),
             12,
             "tools/call",
-            json!({ "name": "tach_guard_verify", "arguments": { "run_id": run_id } }),
+            json!({ "name": "perdure_guard_verify", "arguments": { "run_id": run_id } }),
         ));
         assert_eq!(verify["verified"], json!(true), "verify result: {verify}");
 
@@ -447,7 +447,7 @@ mod tests {
             r.path(),
             13,
             "tools/call",
-            json!({ "name": "tach_goal_receipts", "arguments": { "run_id": run_id } }),
+            json!({ "name": "perdure_goal_receipts", "arguments": { "run_id": run_id } }),
         ));
         assert!(!receipts.as_array().unwrap().is_empty());
 
@@ -456,7 +456,7 @@ mod tests {
             r.path(),
             14,
             "tools/call",
-            json!({ "name": "tach_guard_finalize", "arguments": { "run_id": run_id } }),
+            json!({ "name": "perdure_guard_finalize", "arguments": { "run_id": run_id } }),
         ));
         assert_eq!(fin["ok"], json!(true), "finalize: {fin}");
         // No git repository was created by finalizing.
@@ -471,7 +471,7 @@ mod tests {
             r.path(),
             20,
             "tools/call",
-            json!({ "name": "tach_run_shell", "arguments": {} }),
+            json!({ "name": "perdure_run_shell", "arguments": {} }),
         );
         assert_eq!(bad["error"]["code"], json!(-32602));
 
@@ -484,7 +484,7 @@ mod tests {
             r.path(),
             22,
             "tools/call",
-            json!({ "name": "tach_guard_status", "arguments": {} }),
+            json!({ "name": "perdure_guard_status", "arguments": {} }),
         );
         assert_eq!(op["result"]["isError"], json!(true));
     }

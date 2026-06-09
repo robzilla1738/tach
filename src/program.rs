@@ -12,7 +12,7 @@ pub struct Unit {
     pub imports: HashSet<String>,
 }
 
-/// A whole Tach program: every source file in a project, parsed.
+/// A whole Perdure program: every source file in a project, parsed.
 ///
 /// The checker walks units one at a time (diagnostics are per-file), while the
 /// interpreter sees the merged set of functions and types.

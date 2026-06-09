@@ -1,6 +1,6 @@
 # A stand-in "existing" Rust repo, used by the coding-harness e2e to prove
 # detection picks `cargo test`. The e2e never runs cargo here; it points the
-# guard at the cheap `check.sh` so CI needs no toolchain. Excluded from the tach
+# guard at the cheap `check.sh` so CI needs no toolchain. Excluded from the perdure
 # workspace (see the root Cargo.toml).
 [package]
 name = "existing-rust-fixture"

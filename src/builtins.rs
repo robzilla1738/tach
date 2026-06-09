@@ -42,7 +42,7 @@ pub fn module_member(module: &str, member: &str) -> Option<BuiltinFn> {
     Some(BuiltinFn { effect, ret })
 }
 
-/// All effect labels Tach understands, in a stable order. Used by `tach audit`
+/// All effect labels Perdure understands, in a stable order. Used by `perdure audit`
 /// and to validate that a declared effect actually names a real effect.
 pub const KNOWN_EFFECTS: &[&str] = &[
     "db.read",
@@ -54,7 +54,7 @@ pub const KNOWN_EFFECTS: &[&str] = &[
 ];
 
 /// A short, human description of what an effect lets code do — surfaced by
-/// `tach audit` so a reviewer (or agent) instantly knows the blast radius.
+/// `perdure audit` so a reviewer (or agent) instantly knows the blast radius.
 pub fn effect_description(effect: &str) -> &'static str {
     match effect {
         "db.read" => "reads from the database",
@@ -68,7 +68,7 @@ pub fn effect_description(effect: &str) -> &'static str {
 }
 
 /// Effects considered "dangerous" — money movement, network egress, writes.
-/// `tach audit` flags these so they get extra scrutiny.
+/// `perdure audit` flags these so they get extra scrutiny.
 pub fn is_sensitive(effect: &str) -> bool {
     matches!(effect, "net.write" | "net.read" | "db.write")
 }

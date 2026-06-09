@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://tach.dev/schemas/guard-verify.schema.json",
-  "title": "Tach Guard Verify Result",
-  "description": "The result of `tach guard verify [--rerun] --json` — the status packet plus, when the verify was refused, machine-actionable repair hints and the exact next move. Read `verified`: it is true only when every required command exited 0 AND no out-of-scope file changed. On refusal, `rejection` names what to fix and `recommended_command` / `next_action` say what to run next. The full command evidence (exit codes, stdout/stderr artifacts) lives in the receipts, not here.",
+  "$id": "https://perdure.dev/schemas/guard-verify.schema.json",
+  "title": "Perdure Guard Verify Result",
+  "description": "The result of `perdure guard verify [--rerun] --json` — the status packet plus, when the verify was refused, machine-actionable repair hints and the exact next move. Read `verified`: it is true only when every required command exited 0 AND no out-of-scope file changed. On refusal, `rejection` names what to fix and `recommended_command` / `next_action` say what to run next. The full command evidence (exit codes, stdout/stderr artifacts) lives in the receipts, not here.",
   "type": "object",
   "required": ["run_id", "goal", "phase", "verified", "commands_required", "commands_passed", "out_of_scope", "receipts", "step", "next_action", "recommended_command"],
   "additionalProperties": false,
@@ -51,6 +51,6 @@
       }
     },
     "next_action": { "type": "string", "description": "The agent's next move: edit_then_verify | fix_scope_violation | run_verify | finalize | done | aborted | blocked." },
-    "recommended_command": { "type": "string", "description": "The exact Tach command to run next (empty when the run is terminal)." }
+    "recommended_command": { "type": "string", "description": "The exact Perdure command to run next (empty when the run is terminal)." }
   }
 }

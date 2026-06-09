@@ -3,7 +3,7 @@
 //! Layout under a repository root:
 //!
 //! ```text
-//! .tach/goals/<run_id>/
+//! .perdure/goals/<run_id>/
 //!   goal.json              the resolved GoalSpec + the base source snapshot
 //!   state.json             the current RunState (status, step, metrics)
 //!   events.jsonl           append-only history
@@ -130,7 +130,7 @@ pub struct Checkpoint {
 }
 
 /// A human approval gate on an effectful action. The driver writes it `pending`
-/// when it proposes the action; the `tach goal approve`/`deny` command flips it to
+/// when it proposes the action; the `perdure goal approve`/`deny` command flips it to
 /// `granted`/`denied`. **The approval file is the durable truth** for whether a
 /// gate is resolved — the runtime only ever reads it after creating it.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -178,14 +178,14 @@ pub struct Receipt {
 }
 
 pub fn goals_root(repo: &Path) -> PathBuf {
-    repo.join(".tach").join("goals")
+    repo.join(".perdure").join("goals")
 }
 
-/// The sandbox `HOME` handed to every command Tach runs, in place of the real user
-/// home. Lives under `.tach/` (which the snapshot gate hard-excludes), so a tool
+/// The sandbox `HOME` handed to every command Perdure runs, in place of the real user
+/// home. Lives under `.perdure/` (which the snapshot gate hard-excludes), so a tool
 /// writing into `$HOME` neither leaks credentials from nor churns the real repo.
 pub fn sandbox_home(repo: &Path) -> PathBuf {
-    repo.join(".tach").join("sandbox-home")
+    repo.join(".perdure").join("sandbox-home")
 }
 
 pub fn run_dir(repo: &Path, run_id: &str) -> PathBuf {
@@ -353,7 +353,7 @@ pub fn load_state(repo: &Path, run_id: &str) -> io::Result<RunState> {
     read_json(&state_path(repo, run_id))
 }
 
-/// Save the baseline manifest a coding run snapshots at `tach guard begin` — the
+/// Save the baseline manifest a coding run snapshots at `perdure guard begin` — the
 /// repo-relative path -> content-hash map the scope/diff gate compares against.
 /// Kept separate from `goal.json` so a real repo's baseline (hashes only) never
 /// bloats the goal record the way `base_files` (full source) would.
@@ -369,9 +369,9 @@ fn baseline_ignore_path(repo: &Path, run_id: &str) -> PathBuf {
     run_dir(repo, run_id).join("baseline-ignore.json")
 }
 
-/// Freeze the ignore globs a coding run resolved at `tach guard begin`, so every later
+/// Freeze the ignore globs a coding run resolved at `perdure guard begin`, so every later
 /// scope diff classifies against the *same* blind spots. Without this the gate would
-/// re-read a live `.tachignore` on each `verify`/`commit`, and an agent could add a
+/// re-read a live `.perdureignore` on each `verify`/`commit`, and an agent could add a
 /// pattern mid-session to hide an out-of-scope write it had already made.
 pub fn save_baseline_ignore(repo: &Path, run_id: &str, globs: &[String]) -> io::Result<()> {
     write_json(&baseline_ignore_path(repo, run_id), &globs.to_vec())
@@ -545,7 +545,7 @@ where
 // the durable truth.
 
 fn active_guard_path(repo: &Path) -> PathBuf {
-    repo.join(".tach").join("guard-active")
+    repo.join(".perdure").join("guard-active")
 }
 
 pub fn set_active_guard(repo: &Path, run_id: &str) -> io::Result<()> {
@@ -649,7 +649,7 @@ pub fn allocate_run(repo: &Path, fingerprint: &str) -> io::Result<String> {
 
 // ----- Per-run advisory lock -----
 
-/// An advisory lock over one run directory, so two concurrent `tach` processes can't
+/// An advisory lock over one run directory, so two concurrent `perdure` processes can't
 /// drive the same run at once. The receipt spine already makes that *safe* (a second
 /// invoke re-derives the same idempotency key and reuses the receipt) but not *free*:
 /// without a lock, two processes could both pass the "no receipt yet" check and invoke
@@ -660,7 +660,7 @@ pub fn allocate_run(repo: &Path, fingerprint: &str) -> io::Result<String> {
 /// descriptor closes (i.e. on process exit), so a crashed holder never strands a stale
 /// lock. Elsewhere it is a best-effort `create_new` lockfile removed on drop.
 ///
-/// Honesty: the lockfile lives in agent-writable `.tach/`, so a determined agent could
+/// Honesty: the lockfile lives in agent-writable `.perdure/`, so a determined agent could
 /// delete it. This guards against *accidental* concurrency (two honest invocations) —
 /// it is not, and cannot be, a defense against an adversary with filesystem access.
 /// How long [`RunLock::acquire`] keeps retrying a contended lock before failing. Sized
@@ -714,7 +714,7 @@ impl RunLock {
                 if waited >= LOCK_ACQUIRE_GRACE {
                     return Err(io::Error::new(
                         io::ErrorKind::WouldBlock,
-                        format!("run `{run_id}` is already being operated by another tach process"),
+                        format!("run `{run_id}` is already being operated by another perdure process"),
                     ));
                 }
                 std::thread::sleep(step);
@@ -881,7 +881,7 @@ mod tests {
         static N: AtomicU64 = AtomicU64::new(0);
         let n = N.fetch_add(1, Ordering::Relaxed);
         let p =
-            std::env::temp_dir().join(format!("tach_store_{}_{}_{}", std::process::id(), tag, n));
+            std::env::temp_dir().join(format!("perdure_store_{}_{}_{}", std::process::id(), tag, n));
         let _ = fs::remove_dir_all(&p);
         p
     }

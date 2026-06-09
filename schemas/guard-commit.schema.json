@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://tach.dev/schemas/guard-commit.schema.json",
-  "title": "Tach Guard Outcome",
-  "description": "The outcome of `tach guard commit` or `tach guard abort`. A commit finalizes a verified, unchanged-since-verify session into Tach's own ledger only — it does not create a git commit or touch git in any way. When `ok` is false, `reason` explains the refusal (not verified, tree changed since verify, or out-of-scope writes present) and the run is left resumable so the agent can fix and retry.",
+  "$id": "https://perdure.dev/schemas/guard-commit.schema.json",
+  "title": "Perdure Guard Outcome",
+  "description": "The outcome of `perdure guard commit` or `perdure guard abort`. A commit finalizes a verified, unchanged-since-verify session into Perdure's own ledger only — it does not create a git commit or touch git in any way. When `ok` is false, `reason` explains the refusal (not verified, tree changed since verify, or out-of-scope writes present) and the run is left resumable so the agent can fix and retry.",
   "type": "object",
   "required": ["run_id", "ok", "reason", "status", "phase"],
   "additionalProperties": false,

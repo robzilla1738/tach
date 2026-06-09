@@ -3,11 +3,11 @@
 # own workspace (no built-in Rust catalog entry) must run, pause for approval,
 # survive a mid-loop crash with exactly-once refunds, replay deterministically —
 # and, critically, RESUME OFF THE SOURCE SNAPSHOT taken at run start, so editing
-# the live goal.tach after the run begins cannot change the in-flight run.
+# the live goal.pdr after the run begins cannot change the in-flight run.
 #
-# Flow: scaffold `tach new demo --goal chargebacks` (writes a ReconcileLocalDemo
-# goal.tach), check it, run to the first gate, approve, crash right after refund #1,
-# then EDIT the live goal.tach, resume, and prove the run ignored the edit; approve
+# Flow: scaffold `perdure new demo --goal chargebacks` (writes a ReconcileLocalDemo
+# goal.pdr), check it, run to the first gate, approve, crash right after refund #1,
+# then EDIT the live goal.pdr, resume, and prove the run ignored the edit; approve
 # the second gate, finish, replay. Finally prove ReconcileLocalDemo is not built-in.
 # Hermetic: the "tools" are offline fakes — no network, no clock, no services.
 set -euo pipefail
@@ -15,7 +15,7 @@ export NO_COLOR=1
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cargo build --release --manifest-path "$ROOT/Cargo.toml"
-BIN="$ROOT/target/release/tach"
+BIN="$ROOT/target/release/perdure"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -31,24 +31,24 @@ refund_receipts() {
   "$BIN" goal receipts "$1" | grep -c 'fake.stripe.refund' || true
 }
 
-echo "## tach new demo --goal chargebacks  (scaffold a workspace-authored plan goal)"
+echo "## perdure new demo --goal chargebacks  (scaffold a workspace-authored plan goal)"
 "$BIN" new demo --goal chargebacks >/dev/null
 cd demo
-if ! grep -q 'goal ReconcileLocalDemo' goal.tach; then
+if ! grep -q 'goal ReconcileLocalDemo' goal.pdr; then
   echo "FAIL: scaffold did not write a ReconcileLocalDemo goal"
   exit 1
 fi
-echo "   ok — goal.tach written"
+echo "   ok — goal.pdr written"
 
-echo "## tach fmt --check goal.tach  (the scaffolded plan goal is already canonical)"
-"$BIN" fmt --check goal.tach >/dev/null
+echo "## perdure fmt --check goal.pdr  (the scaffolded plan goal is already canonical)"
+"$BIN" fmt --check goal.pdr >/dev/null
 echo "   ok — fmt is a no-op (formatter renders the whole plan block)"
 
-echo "## tach goal check ReconcileLocalDemo  (static plan validation passes)"
+echo "## perdure goal check ReconcileLocalDemo  (static plan validation passes)"
 "$BIN" goal check ReconcileLocalDemo >/dev/null
 echo "   ok — plan checks out"
 
-echo "## tach goal run ReconcileLocalDemo  (expect a pause at the first duplicate's gate)"
+echo "## perdure goal run ReconcileLocalDemo  (expect a pause at the first duplicate's gate)"
 "$BIN" goal run ReconcileLocalDemo >/dev/null
 RUN_ID="$("$BIN" goal list | awk '/run_/ {print $1; exit}')"
 echo "## run id: $RUN_ID"
@@ -75,14 +75,14 @@ if [ "$(refund_receipts "$RUN_ID")" -ne 1 ]; then
 fi
 echo "   ok — crashed mid-loop with the first refund durable"
 
-echo "## EDIT the live goal.tach (change the customer + email), then resume — the run must IGNORE the edit"
+echo "## EDIT the live goal.pdr (change the customer + email), then resume — the run must IGNORE the edit"
 python3 - <<'PY'
-p = "goal.tach"
+p = "goal.pdr"
 s = open(p).read()
 s = s.replace('cus_42', 'cus_EDITED').replace('billing@acme.test', 'edited@acme.test')
 open(p, 'w').write(s)
 PY
-if ! grep -q 'cus_EDITED' goal.tach; then
+if ! grep -q 'cus_EDITED' goal.pdr; then
   echo "FAIL: the live edit did not take"
   exit 1
 fi
@@ -136,7 +136,7 @@ if [ "$TOTAL" -ne 6 ]; then
 fi
 echo "   ok — each duplicate refunded exactly once across the crash AND the live edit"
 
-echo "## tach goal replay $RUN_ID  (expect exact reproduction)"
+echo "## perdure goal replay $RUN_ID  (expect exact reproduction)"
 "$BIN" goal replay "$RUN_ID"
 
 echo "## prove ReconcileLocalDemo is NOT a built-in (it only runs from the workspace)"

@@ -1,18 +1,18 @@
-//! The coding-agent guard session — Tach's runtime for an externally-edited repo.
+//! The coding-agent guard session — Perdure's runtime for an externally-edited repo.
 //!
 //! Unlike the repair loop (which fixes toy source in memory) or the action layer
 //! (which calls fake tools), a *guard* session governs a real repo that an
-//! external agent (Claude Code, Codex, …) edits with its own tools. Tach does not
+//! external agent (Claude Code, Codex, …) edits with its own tools. Perdure does not
 //! make the edits; it is the guardrail and the ledger:
 //!
 //!   begin   snapshot the working tree as a baseline; open the session
 //!   diff    classify what changed against the goal's `fs.write` scope (read-only)
 //!   verify  reject out-of-scope edits; run the required commands for real, each
 //!           captured as a receipt; set the `verified` bit
-//!   commit  if verified and unchanged-since-verify, finalize into Tach's ledger
+//!   commit  if verified and unchanged-since-verify, finalize into Perdure's ledger
 //!   abort   cancel the session
 //!
-//! Honesty: with no sandbox, Tach cannot *prevent* an out-of-scope write — the
+//! Honesty: with no sandbox, Perdure cannot *prevent* an out-of-scope write — the
 //! agent has already touched the tree by the time `verify` runs. It is a
 //! detect-and-reject gate: the violation is recorded and the commit is blocked.
 //!
@@ -113,8 +113,8 @@ pub struct GuardOutcome {
     pub phase: String,
 }
 
-/// The ledger-integrity report (`guard audit`) — the operator's trust anchor. Tach
-/// cannot *prevent* an agent with write access to `.tach/` from rewriting its own
+/// The ledger-integrity report (`guard audit`) — the operator's trust anchor. Perdure
+/// cannot *prevent* an agent with write access to `.perdure/` from rewriting its own
 /// history (there is no sandbox); this proves whether it did.
 #[derive(Serialize)]
 pub struct AuditReport {
@@ -208,7 +208,7 @@ pub struct GuardNext {
     /// The live out-of-scope writes, if any — non-empty means `fix_scope_violation`.
     pub scope_violations: Vec<ScopeViolation>,
     pub done_condition: String,
-    /// The exact Tach command to run next (empty when the run is terminal).
+    /// The exact Perdure command to run next (empty when the run is terminal).
     pub recommended_command: String,
     pub instructions: Vec<String>,
 }
@@ -256,19 +256,19 @@ pub struct GuardVerify {
 // ----- begin -----
 
 /// Open a new guard session over the current working tree. Resolves the goal from
-/// the repo's `Tachfile` (by name, or the sole goal if `goal_name` is `None`),
+/// the repo's `Perdurefile` (by name, or the sole goal if `goal_name` is `None`),
 /// snapshots the tree as the baseline, and records the run.
 pub fn begin(repo: &Path, goal_name: Option<&str>) -> io::Result<RunState> {
     let (prog, diags) = project::load_goal_file(repo).map_err(|_| {
         io::Error::new(
             io::ErrorKind::NotFound,
-            "no Tachfile in this repo — run `tach init --existing` first",
+            "no Perdurefile in this repo — run `perdure init --existing` first",
         )
     })?;
     if diags.iter().any(|d| d.is_error()) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "Tachfile has errors — run `tach check` after fixing it",
+            "Perdurefile has errors — run `perdure check` after fixing it",
         ));
     }
     let decl = match goal_name {
@@ -280,7 +280,7 @@ pub fn begin(repo: &Path, goal_name: Option<&str>) -> io::Result<RunState> {
             io::Error::new(
                 io::ErrorKind::NotFound,
                 format!(
-                    "no goal `{name}` in Tachfile (available: {})",
+                    "no goal `{name}` in Perdurefile (available: {})",
                     names.join(", ")
                 ),
             )
@@ -292,13 +292,13 @@ pub fn begin(repo: &Path, goal_name: Option<&str>) -> io::Result<RunState> {
             } else if all.is_empty() {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
-                    "Tachfile declares no goal",
+                    "Perdurefile declares no goal",
                 ));
             } else {
                 let names: Vec<String> = all.iter().map(|g| g.name.clone()).collect();
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!("Tachfile has several goals; name one: {}", names.join(", ")),
+                    format!("Perdurefile has several goals; name one: {}", names.join(", ")),
                 ));
             }
         }
@@ -328,7 +328,7 @@ pub fn begin(repo: &Path, goal_name: Option<&str>) -> io::Result<RunState> {
             ),
         ));
     }
-    // A repo Tach couldn't fingerprint at adoption ships a placeholder test command
+    // A repo Perdure couldn't fingerprint at adoption ships a placeholder test command
     // (see `adopt::PLACEHOLDER_COMMAND`) that fails if run. Refuse to open a guard
     // against it: a session whose only "proof of success" is an unresolved placeholder
     // is a gate that verifies nothing. Fail here — early, with an actionable message —
@@ -343,9 +343,9 @@ pub fn begin(repo: &Path, goal_name: Option<&str>) -> io::Result<RunState> {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!(
-                "coding goal `{}` still carries the placeholder test command — Tach could \
+                "coding goal `{}` still carries the placeholder test command — Perdure could \
                  not detect this repo's test command when it was adopted. Replace the \
-                 `shell.run` / `require {{ command(\"…\").passes }}` lines in the Tachfile \
+                 `shell.run` / `require {{ command(\"…\").passes }}` lines in the Perdurefile \
                  with your real test command before opening a guard session",
                 spec.name
             ),
@@ -364,8 +364,8 @@ pub fn begin(repo: &Path, goal_name: Option<&str>) -> io::Result<RunState> {
 
     // Resolve the ignore set ONCE, here, and freeze it into the run. Every later
     // scope diff reconstructs it from this snapshot rather than re-reading a live
-    // `.tachignore`, so the gate's blind spots are fixed at `begin` and an agent can't
-    // edit `.tachignore` mid-session to hide an out-of-scope write.
+    // `.perdureignore`, so the gate's blind spots are fixed at `begin` and an agent can't
+    // edit `.perdureignore` mid-session to hide an out-of-scope write.
     let ignore = Ignore::load(repo);
     store::save_baseline_ignore(repo, &run_id, ignore.globs())?;
     let baseline = snapshot::snapshot(repo, &ignore)?;
@@ -418,7 +418,7 @@ fn session(repo: &Path, run_id: &str) -> io::Result<(GoalRecord, RunState)> {
 }
 
 /// The ignore set a run **froze** at `begin`. The blind spots are fixed for the whole
-/// session, so an agent editing `.tachignore` mid-session cannot change what the gate
+/// session, so an agent editing `.perdureignore` mid-session cannot change what the gate
 /// sees. Falls back to a live load only for runs begun before the freeze shipped.
 fn frozen_ignore(repo: &Path, run_id: &str) -> Ignore {
     match store::load_baseline_ignore(repo, run_id) {
@@ -440,7 +440,7 @@ fn scope_diff(
     let writes = spec.allowed_writes();
     // For a guard session, the goal *must* declare `fs.write` (enforced at
     // `begin`). Treat an absent scope as "no writes allowed" so a missing grant can
-    // never silently mean unrestricted authority — the opposite of Tach's thesis.
+    // never silently mean unrestricted authority — the opposite of Perdure's thesis.
     let in_writable = |path: &str| match &writes {
         Some(globs) => globs.iter().any(|g| glob_match(g, path)),
         None => false,
@@ -454,7 +454,7 @@ fn scope_diff(
     let mut in_scope = Vec::new();
     let mut out_of_scope = Vec::new();
     for path in diff.changed() {
-        // A symlink under writable scope is rejected by default: Tach never follows
+        // A symlink under writable scope is rejected by default: Perdure never follows
         // it, so a write *through* the link lands outside the gate's view.
         if in_writable(&path) && !is_symlink(&path) {
             in_scope.push(path);
@@ -503,7 +503,7 @@ fn rel(repo: &Path, p: &Path) -> String {
 
 /// The history payload for one out-of-scope write, naming *why* it was rejected so
 /// the agent can react: a `symlink` under writable scope (a write-through vector
-/// Tach refuses by default) versus an ordinary `out_of_scope` path.
+/// Perdure refuses by default) versus an ordinary `out_of_scope` path.
 fn scope_violation(head: &Manifest, path: &str, allowed: &[String]) -> Value {
     let reason = if matches!(
         head.get(path).map(|e| e.kind),
@@ -543,10 +543,10 @@ pub fn context(repo: &Path, run_id: &str) -> io::Result<GuardContext> {
     let (record, state) = session(repo, run_id)?;
     let spec = &record.spec;
     let next = match state.guard_phase.as_str() {
-        "verified" => "run `tach guard commit` to finalize the verified changes",
+        "verified" => "run `perdure guard commit` to finalize the verified changes",
         "committed" => "done — this run is committed",
         "aborted" => "this run was aborted; begin a new one",
-        _ => "edit files within allowed_files, then run `tach guard verify`",
+        _ => "edit files within allowed_files, then run `perdure guard verify`",
     };
     Ok(GuardContext {
         goal: state.goal.clone(),
@@ -556,13 +556,13 @@ pub fn context(repo: &Path, run_id: &str) -> io::Result<GuardContext> {
         allowed_commands: spec.allow.shell.clone(),
         forbidden: json!({
             "out_of_scope_writes": "edits outside allowed_files are rejected at the gate and block commit",
-            "unallowlisted_commands": "only allowed_commands are run by tach",
+            "unallowlisted_commands": "only allowed_commands are run by perdure",
         }),
         current_failure: last_failure(repo, run_id),
         next_required_action: next.to_string(),
-        verification_condition: "`tach guard status --json` reports verified=true".to_string(),
-        done_condition: "`tach guard status --json` reports verified=true and phase=committed \
-             (run `tach guard commit` after a green verify)"
+        verification_condition: "`perdure guard status --json` reports verified=true".to_string(),
+        done_condition: "`perdure guard status --json` reports verified=true and phase=committed \
+             (run `perdure guard commit` after a green verify)"
             .to_string(),
         verified: state.verified,
     })
@@ -611,11 +611,11 @@ fn blind_spots(repo: &Path, run_id: &str) -> Vec<String> {
 /// The one canonical statement of "you are done", shared by every agent-facing
 /// packet so the bar an agent must clear is spelled the same everywhere.
 const DONE_CONDITION: &str =
-    "`tach guard status --json` reports verified=true, then finalize with `tach guard finalize`";
+    "`perdure guard status --json` reports verified=true, then finalize with `perdure guard finalize`";
 
 /// The schema tag stamped on the generic agent context, so an integrator can pin
 /// the contract shape independently of the binary version.
-const AGENT_CONTEXT_SCHEMA: &str = "tach.agent-context.v1";
+const AGENT_CONTEXT_SCHEMA: &str = "perdure.agent-context.v1";
 
 /// Everything the agent-facing packets need, computed from one live scope diff so
 /// `next`, `context --for-agent`, and `verify --json` all agree on the same view of
@@ -708,80 +708,80 @@ fn agent_state(
             "finalized",
             "done",
             String::new(),
-            vec!["This run is finalized in Tach's ledger. Begin a new session for more work.".into()],
+            vec!["This run is finalized in Perdure's ledger. Begin a new session for more work.".into()],
         ),
         "aborted" => (
             "aborted",
             "aborted",
             String::new(),
-            vec!["This run was aborted. Run `tach guard begin <Goal>` to start over.".into()],
+            vec!["This run was aborted. Run `perdure guard begin <Goal>` to start over.".into()],
         ),
         _ if cmd_misconfigured => (
             "blocked",
             "blocked",
             String::new(),
             vec![
-                "A required command is not in the goal's allow.shell list, so Tach cannot run it."
+                "A required command is not in the goal's allow.shell list, so Perdure cannot run it."
                     .into(),
-                "This is a goal-configuration problem: a human must fix the Tachfile.".into(),
+                "This is a goal-configuration problem: a human must fix the Perdurefile.".into(),
             ],
         ),
         _ if n_violations > 0 => (
             "blocked",
             "fix_scope_violation",
-            "tach guard diff --json".into(),
+            "perdure guard diff --json".into(),
             vec![
                 "You changed files outside allowed_files. Revert them, or move the change into scope."
                     .into(),
-                "Run `tach guard diff --json` to see exactly which files are out of scope.".into(),
+                "Run `perdure guard diff --json` to see exactly which files are out of scope.".into(),
                 "Out-of-scope writes block verify and finalize until reverted.".into(),
             ],
         ),
         _ if verified && digest_matches => (
             "verified",
             "finalize",
-            "tach guard finalize".into(),
+            "perdure guard finalize".into(),
             vec![
                 "All required commands passed and no out-of-scope files changed.".into(),
-                "Run `tach guard finalize` to record this run in Tach's ledger (this never touches git)."
+                "Run `perdure guard finalize` to record this run in Perdure's ledger (this never touches git)."
                     .into(),
             ],
         ),
         _ if verified && !digest_matches => (
             "editing",
             "run_verify",
-            "tach guard verify".into(),
+            "perdure guard verify".into(),
             vec![
-                "The tree changed since the last verify. Run `tach guard verify` again before finalizing."
+                "The tree changed since the last verify. Run `perdure guard verify` again before finalizing."
                     .into(),
             ],
         ),
         _ if command_failing => (
             "editing",
             "edit_then_verify",
-            "tach guard verify".into(),
+            "perdure guard verify".into(),
             vec![
                 "A required command is still failing. Edit files within allowed_files to fix it."
                     .into(),
-                "Then run `tach guard verify`; do not claim done until verified=true.".into(),
+                "Then run `perdure guard verify`; do not claim done until verified=true.".into(),
             ],
         ),
         _ if has_changes => (
             "editing",
             "run_verify",
-            "tach guard verify".into(),
+            "perdure guard verify".into(),
             vec![
                 "You have in-scope changes that are not yet verified.".into(),
-                "Run `tach guard verify` to run the required commands and set the verified bit.".into(),
+                "Run `perdure guard verify` to run the required commands and set the verified bit.".into(),
             ],
         ),
         _ => (
             "editing",
             "edit_then_verify",
-            "tach guard verify".into(),
+            "perdure guard verify".into(),
             vec![
                 "Edit only files matching allowed_files.".into(),
-                "After editing, run `tach guard verify`. Do not claim done until verified=true.".into(),
+                "After editing, run `perdure guard verify`. Do not claim done until verified=true.".into(),
             ],
         ),
     }
@@ -822,7 +822,7 @@ fn rejection_from_plan(spec: &GoalSpec, state: &RunState, plan: &AgentPlan) -> O
             violations: vec![],
             repair_strategies: vec![
                 "add_command_to_allow_shell".into(),
-                "ask_human_to_fix_tachfile".into(),
+                "ask_human_to_fix_perdurefile".into(),
             ],
             preferred_next_action: PreferredNextAction {
                 kind: "ask_human".into(),
@@ -1160,7 +1160,7 @@ pub fn commit(repo: &Path, run_id: &str) -> io::Result<GuardOutcome> {
         return Ok(refuse(
             run_id,
             &state,
-            "not verified — run `tach guard verify` first".into(),
+            "not verified — run `perdure guard verify` first".into(),
         ));
     }
 
@@ -1185,7 +1185,7 @@ pub fn commit(repo: &Path, run_id: &str) -> io::Result<GuardOutcome> {
             return Ok(refuse(
                 run_id,
                 &state,
-                "tree changed since verify — run `tach guard verify` again".into(),
+                "tree changed since verify — run `perdure guard verify` again".into(),
             ));
         }
         for path in &agent_out {
@@ -1355,7 +1355,7 @@ pub fn replay(repo: &Path, run_id: &str, rerun: bool) -> io::Result<crate::runti
 ///      actually support, so a hand-edited `state.json: verified=true` is exposed.
 ///
 /// This is detection, not prevention: with no sandbox an agent *can* rewrite files in
-/// `.tach/`, but it cannot produce a self-consistent forgery. The trust boundary is an
+/// `.perdure/`, but it cannot produce a self-consistent forgery. The trust boundary is an
 /// operator (human or CI) running this from outside the agent.
 pub fn audit(repo: &Path, run_id: &str) -> io::Result<AuditReport> {
     let (record, state) = session(repo, run_id)?;
@@ -1515,7 +1515,7 @@ mod tests {
             static N: AtomicU64 = AtomicU64::new(0);
             let n = N.fetch_add(1, Ordering::Relaxed);
             let dir = std::env::temp_dir().join(format!(
-                "tach_guard_{}_{}_{}",
+                "perdure_guard_{}_{}_{}",
                 std::process::id(),
                 tag,
                 n
@@ -1543,7 +1543,7 @@ mod tests {
     fn scaffold(r: &TempRepo, fixed: bool) {
         r.write("Cargo.toml", "[package]\nname=\"x\"\n");
         r.write(
-            "Tachfile",
+            "Perdurefile",
             &crate::adopt::coding_goal_source(
                 "FixFailingTests",
                 "sh check.sh",
@@ -1715,16 +1715,16 @@ mod tests {
     }
 
     #[test]
-    fn editing_tachignore_cannot_hide_an_out_of_scope_write() {
+    fn editing_perdureignore_cannot_hide_an_out_of_scope_write() {
         // The adversarial bypass: an agent creates an out-of-scope file AND adds it to
-        // `.tachignore` to slip it past the gate. The frozen ignore set (captured at
+        // `.perdureignore` to slip it past the gate. The frozen ignore set (captured at
         // begin) ignores the live edit, so the file is still seen — and the
-        // `.tachignore` edit is itself visible, never self-hidden.
+        // `.perdureignore` edit is itself visible, never self-hidden.
         let r = TempRepo::new("frozen");
         scaffold(&r, true);
         let id = begin(r.path(), Some("FixFailingTests")).unwrap().run_id;
         r.write("secret.txt", "exfil\n");
-        r.write(".tachignore", "secret.txt\n.tachignore\n");
+        r.write(".perdureignore", "secret.txt\n.perdureignore\n");
         let d = diff(r.path(), &id).unwrap();
         assert!(
             d.out_of_scope.contains(&"secret.txt".to_string()),
@@ -1732,8 +1732,8 @@ mod tests {
             d.out_of_scope
         );
         assert!(
-            d.out_of_scope.contains(&".tachignore".to_string()),
-            "a .tachignore edit is never self-ignored: {:?}",
+            d.out_of_scope.contains(&".perdureignore".to_string()),
+            "a .perdureignore edit is never self-ignored: {:?}",
             d.out_of_scope
         );
         assert!(d.rejected);
@@ -1750,7 +1750,7 @@ mod tests {
         let r = TempRepo::new("toolgen");
         r.write("Cargo.toml", "[package]\nname=\"x\"\n");
         r.write(
-            "Tachfile",
+            "Perdurefile",
             &crate::adopt::coding_goal_source(
                 "FixFailingTests",
                 "sh check.sh",
@@ -1805,7 +1805,7 @@ mod tests {
         let r = TempRepo::new("launder");
         r.write("Cargo.toml", "[package]\nname=\"x\"\n");
         r.write(
-            "Tachfile",
+            "Perdurefile",
             &crate::adopt::coding_goal_source(
                 "FixFailingTests",
                 "sh check.sh",
@@ -1896,7 +1896,7 @@ mod tests {
         r.write("Cargo.toml", "[package]\nname=\"x\"\n");
         // Declares fs.write but no `command(...).passes` — nothing proves success.
         r.write(
-            "Tachfile",
+            "Perdurefile",
             "goal NoCmd -> Success {\n  budget {\n    steps: 40\n  }\n  \
              allow {\n    fs.write [\"src/**\"]\n    shell.run [\"sh check.sh\"]\n  }\n  \
              require {\n    no_out_of_scope_writes\n  }\n}\n",
@@ -1914,7 +1914,7 @@ mod tests {
         r.write("Cargo.toml", "[package]\nname=\"x\"\n");
         // Declares a required command but no fs.write scope — no ambient authority.
         r.write(
-            "Tachfile",
+            "Perdurefile",
             "goal NoWrite -> Success {\n  budget {\n    steps: 40\n  }\n  \
              allow {\n    shell.run [\"sh check.sh\"]\n  }\n  \
              require {\n    command(\"sh check.sh\").passes\n  }\n}\n",
@@ -1928,13 +1928,13 @@ mod tests {
 
     #[test]
     fn begin_rejects_unresolved_placeholder_command() {
-        // A repo Tach couldn't fingerprint at adoption ships the failing placeholder
+        // A repo Perdure couldn't fingerprint at adoption ships the failing placeholder
         // command. Opening a guard against it must be refused — an unresolved
         // placeholder proves nothing, and the old `echo …` placeholder exited 0.
         let r = TempRepo::new("placeholder");
         r.write("Cargo.toml", "[package]\nname=\"x\"\n");
         r.write(
-            "Tachfile",
+            "Perdurefile",
             &crate::adopt::coding_goal_source(
                 "FixFailingTests",
                 crate::adopt::PLACEHOLDER_COMMAND,
@@ -1973,7 +1973,7 @@ mod tests {
         scaffold(&r, true);
         let id = begin(r.path(), None).unwrap().run_id;
         // Agent adds a symlink inside writable scope pointing outside the repo — a
-        // write-through vector Tach never follows.
+        // write-through vector Perdure never follows.
         symlink("../secret.txt", r.path().join("src/outside")).unwrap();
         let d = diff(r.path(), &id).unwrap();
         assert!(
@@ -2026,7 +2026,7 @@ mod tests {
         let n = next(r.path(), &id).unwrap();
         assert_eq!(n.status, "editing");
         assert_eq!(n.next_action, "edit_then_verify");
-        assert_eq!(n.recommended_command, "tach guard verify");
+        assert_eq!(n.recommended_command, "perdure guard verify");
         assert!(n.scope_violations.is_empty());
         assert!(n.done_condition.contains("verified=true"));
 
@@ -2040,7 +2040,7 @@ mod tests {
         let n = next(r.path(), &id).unwrap();
         assert_eq!(n.status, "verified");
         assert_eq!(n.next_action, "finalize");
-        assert_eq!(n.recommended_command, "tach guard finalize");
+        assert_eq!(n.recommended_command, "perdure guard finalize");
 
         // After finalize → done, with no further command.
         commit(r.path(), &id).unwrap();
@@ -2106,7 +2106,7 @@ mod tests {
 
         let c = agent_context(r.path(), &id, "generic").unwrap();
         assert_eq!(c.agent, "generic");
-        assert_eq!(c.schema, "tach.agent-context.v1");
+        assert_eq!(c.schema, "perdure.agent-context.v1");
         assert!(c.allowed_files.iter().any(|g| g.contains("src")));
         assert!(c
             .allowed_commands

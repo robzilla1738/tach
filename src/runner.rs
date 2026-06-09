@@ -126,8 +126,8 @@ test "missing session rejected" {
     #[test]
     fn runs_demo_logic_green() {
         let (prog, diags) = Program::parse_sources(vec![
-            SourceFile::new("auth.tach", CODE),
-            SourceFile::new("auth_test.tach", TESTS),
+            SourceFile::new("auth.pdr", CODE),
+            SourceFile::new("auth_test.pdr", TESTS),
         ]);
         assert!(
             diags.iter().all(|d| !d.is_error()),
@@ -142,8 +142,8 @@ test "missing session rejected" {
     #[test]
     fn filter_selects_subset() {
         let (prog, _) = Program::parse_sources(vec![
-            SourceFile::new("auth.tach", CODE),
-            SourceFile::new("auth_test.tach", TESTS),
+            SourceFile::new("auth.pdr", CODE),
+            SourceFile::new("auth_test.pdr", TESTS),
         ]);
         let report = run_tests(&prog, Some("expired"));
         assert_eq!(report.total(), 1);
@@ -180,8 +180,8 @@ test "seven is odd" {
     #[test]
     fn runs_sum_type_and_match_green() {
         let (prog, diags) = Program::parse_sources(vec![
-            SourceFile::new("parity.tach", SUM_CODE),
-            SourceFile::new("parity_test.tach", SUM_TESTS),
+            SourceFile::new("parity.pdr", SUM_CODE),
+            SourceFile::new("parity_test.pdr", SUM_TESTS),
         ]);
         assert!(
             diags.iter().all(|d| !d.is_error()),

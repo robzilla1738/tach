@@ -1,4 +1,4 @@
-//! The `tach` command-line interface — `new`, `check`, `run`, `test`, `fix`,
+//! The `perdure` command-line interface — `new`, `check`, `run`, `test`, `fix`,
 //! `race`, `trace`, `replay`, `bench`, `audit`. A small hand-rolled dispatcher so
 //! the output is exactly what we want, with zero argument-parsing dependencies.
 
@@ -44,7 +44,7 @@ pub fn run(args: Vec<String>) -> i32 {
         "explain" => cmd_explain(&rest),
         "schema" => cmd_schema(&rest),
         "version" | "--version" | "-V" => {
-            println!("tach {}", env!("CARGO_PKG_VERSION"));
+            println!("perdure {}", env!("CARGO_PKG_VERSION"));
             0
         }
         "help" | "--help" | "-h" => {
@@ -103,10 +103,10 @@ fn cwd() -> PathBuf {
 }
 
 fn is_file_arg(s: &str) -> bool {
-    s.ends_with(".tach") && Path::new(s).is_file()
+    s.ends_with(".pdr") && Path::new(s).is_file()
 }
 
-/// Load a single `.tach` file if one was named, otherwise the whole project.
+/// Load a single `.pdr` file if one was named, otherwise the whole project.
 fn load_target(p: &Parsed) -> Result<Workspace, String> {
     if let Some(first) = p.pos.iter().find(|s| is_file_arg(s)) {
         return project::load_single(Path::new(first)).map_err(|e| e.to_string());
@@ -151,22 +151,22 @@ fn cmd_new(rest: &[String]) -> i32 {
                 println!("    cd {}", name);
                 println!(
                     "    {}  {}",
-                    term::bold("tach goal check ReconcileLocalDemo"),
+                    term::bold("perdure goal check ReconcileLocalDemo"),
                     term::dim("# validate the plan")
                 );
                 println!(
                     "    {}    {}",
-                    term::bold("tach goal run ReconcileLocalDemo"),
+                    term::bold("perdure goal run ReconcileLocalDemo"),
                     term::dim("# runs to the first approval gate, then pauses")
                 );
                 println!(
                     "    {}              {}",
-                    term::bold("tach goal approvals <id>"),
-                    term::dim("# grant it, then `tach goal resume <id>`")
+                    term::bold("perdure goal approvals <id>"),
+                    term::dim("# grant it, then `perdure goal resume <id>`")
                 );
             } else if clean {
                 println!("  {}", term::dim("a minimal, green project."));
-                println!("  next:  cd {} && tach run", name);
+                println!("  next:  cd {} && perdure run", name);
             } else {
                 println!(
                     "  {}",
@@ -176,22 +176,22 @@ fn cmd_new(rest: &[String]) -> i32 {
                 println!("    cd {}", name);
                 println!(
                     "    {}   {}",
-                    term::bold("tach check"),
+                    term::bold("perdure check"),
                     term::dim("# the 3 structured diagnostics")
                 );
                 println!(
                     "    {}     {}",
-                    term::bold("tach fix"),
+                    term::bold("perdure fix"),
                     term::dim("# drive it to green in 3 laps")
                 );
                 println!(
                     "    {}    {}",
-                    term::bold("tach race"),
+                    term::bold("perdure race"),
                     term::dim("# race repair strategies")
                 );
                 println!(
                     "    {}   {}",
-                    term::bold("tach trace"),
+                    term::bold("perdure trace"),
                     term::dim("# inspect the laps")
                 );
             }
@@ -262,7 +262,7 @@ fn cmd_run(rest: &[String]) -> i32 {
             "  {} cannot run — {} error(s). Try `{}`.",
             term::bold_red("●"),
             errs.len(),
-            term::bold("tach fix")
+            term::bold("perdure fix")
         );
         return 1;
     }
@@ -311,7 +311,7 @@ fn cmd_test(rest: &[String]) -> i32 {
                 "  {} test suite blocked by {} compile error(s). Run `{}`.",
                 term::bold_red("●"),
                 errs.len(),
-                term::bold("tach fix")
+                term::bold("perdure fix")
             );
         }
         return 1;
@@ -353,7 +353,7 @@ fn cmd_fix(rest: &[String]) -> i32 {
         }
     };
     if ws.files.is_empty() {
-        println!("  {} no .tach files found here", term::dim("·"));
+        println!("  {} no .pdr files found here", term::dim("·"));
         return 1;
     }
     // An optional coder engages only where deterministic repair gives up. The
@@ -361,7 +361,7 @@ fn cmd_fix(rest: &[String]) -> i32 {
     // patches from a JSON file through the same verification pipeline.
     let coder = match p.get("--coder") {
         Some("fixture") | None if p.has("--coder") => {
-            let path = p.get("--fixtures").unwrap_or(".tach/fixtures.json");
+            let path = p.get("--fixtures").unwrap_or(".perdure/fixtures.json");
             match load_fixture_coder(Path::new(path)) {
                 Ok(c) => Some(c),
                 Err(e) => {
@@ -405,7 +405,7 @@ fn cmd_fix(rest: &[String]) -> i32 {
     }
 }
 
-/// `tach fmt [file] [--check]` — render every `.tach` file to its one canonical
+/// `perdure fmt [file] [--check]` — render every `.pdr` file to its one canonical
 /// form. With `--check` it writes nothing and exits non-zero if anything would
 /// change (the CI gate). Files that don't parse are left untouched.
 fn cmd_fmt(rest: &[String]) -> i32 {
@@ -413,7 +413,7 @@ fn cmd_fmt(rest: &[String]) -> i32 {
     let check = p.has("--check");
 
     let files: Vec<(String, PathBuf, String)> =
-        if let Some(arg) = p.pos.iter().find(|s| s.ends_with(".tach")) {
+        if let Some(arg) = p.pos.iter().find(|s| s.ends_with(".pdr")) {
             let path = PathBuf::from(arg);
             match std::fs::read_to_string(&path) {
                 Ok(t) => vec![(arg.clone(), path, t)],
@@ -438,7 +438,7 @@ fn cmd_fmt(rest: &[String]) -> i32 {
         };
 
     if files.is_empty() {
-        println!("  {} no .tach files found here", term::dim("·"));
+        println!("  {} no .pdr files found here", term::dim("·"));
         return 0;
     }
 
@@ -447,7 +447,7 @@ fn cmd_fmt(rest: &[String]) -> i32 {
     for (disp, abs, text) in &files {
         match fmt::format_file(disp, text) {
             Err(fmt::Skip::ParseError) => {
-                skipped.push((disp.clone(), "does not parse — run `tach check`"))
+                skipped.push((disp.clone(), "does not parse — run `perdure check`"))
             }
             Err(fmt::Skip::HasComments) => {
                 skipped.push((disp.clone(), "has comments (not yet preserved)"))
@@ -482,7 +482,7 @@ fn cmd_fmt(rest: &[String]) -> i32 {
                 println!("  {} {}", term::bold_yellow("✗"), f);
             }
             println!(
-                "  {} {} file(s) need formatting — run `tach fmt`",
+                "  {} {} file(s) need formatting — run `perdure fmt`",
                 term::bold_red("●"),
                 changed.len()
             );
@@ -564,7 +564,7 @@ fn cmd_trace(rest: &[String]) -> i32 {
             println!(
                 "  {} no trace found — run `{}` first",
                 term::dim("·"),
-                term::bold("tach fix")
+                term::bold("perdure fix")
             );
             1
         }
@@ -653,7 +653,7 @@ fn cmd_bench(rest: &[String]) -> i32 {
     };
     let outcome = agent::fix(ws, Strategy::Minimal, max);
     let m = &outcome.metrics;
-    println!("{}", term::bold("Tach bench · agent loop"));
+    println!("{}", term::bold("Perdure bench · agent loop"));
     println!(
         "  {}\n",
         term::dim("the metric that matters for AI coding: time from red to green")
@@ -671,7 +671,7 @@ fn cmd_bench(rest: &[String]) -> i32 {
 }
 
 /// Build a deterministic fixture coder from a JSON file of typed patches. The
-/// schema is a plain array of `Patch` objects (the same shape `tach check
+/// schema is a plain array of `Patch` objects (the same shape `perdure check
 /// --json` emits per diagnostic), so a model — or a human — can author a fix
 /// table the offline loop replays through the verification pipeline.
 fn load_fixture_coder(path: &Path) -> Result<agent::FixtureCoder, String> {
@@ -705,7 +705,7 @@ fn cmd_bench_suite(dir: &Path, max: usize, json: bool) -> i32 {
         );
         return if outcome.all_green() { 0 } else { 1 };
     }
-    println!("{}", term::bold("Tach bench · repair corpus"));
+    println!("{}", term::bold("Perdure bench · repair corpus"));
     println!(
         "  {}\n",
         term::dim("red → green over a suite, not just the demo")
@@ -824,7 +824,7 @@ fn cmd_goal(rest: &[String]) -> i32 {
         "" => cmd_goal_overview(),
         other => {
             eprintln!(
-                "{} unknown `tach goal` subcommand `{}`",
+                "{} unknown `perdure goal` subcommand `{}`",
                 term::bold_red("error:"),
                 other
             );
@@ -841,15 +841,15 @@ fn show_rel(root: &Path, p: &Path) -> String {
     p.strip_prefix(root).unwrap_or(p).display().to_string()
 }
 
-/// `tach init --existing` — adopt the current repo for the coding harness.
+/// `perdure init --existing` — adopt the current repo for the coding harness.
 fn cmd_init(rest: &[String]) -> i32 {
     let p = parse(rest, &[]);
     if !p.has("--existing") {
         eprintln!(
-            "{} usage: tach init --existing [--force]",
+            "{} usage: perdure init --existing [--force]",
             term::bold_red("error:")
         );
-        eprintln!("  adopts the current repo: writes Tachfile, TACH_AGENT.md, .tachignore");
+        eprintln!("  adopts the current repo: writes Perdurefile, PERDURE_AGENT.md, .perdureignore");
         return 2;
     }
     let root = cwd();
@@ -863,8 +863,8 @@ fn cmd_init(rest: &[String]) -> i32 {
                     term::bold(&rep.command)
                 ),
                 None => println!(
-                    "  {} could not detect a test command — set your real one in the Tachfile \
-                     (`shell.run` + `require command(…)`); `tach guard begin` refuses the \
+                    "  {} could not detect a test command — set your real one in the Perdurefile \
+                     (`shell.run` + `require command(…)`); `perdure guard begin` refuses the \
                      placeholder",
                     term::bold_yellow("!")
                 ),
@@ -882,7 +882,7 @@ fn cmd_init(rest: &[String]) -> i32 {
             println!();
             println!(
                 "  next:  {}",
-                term::bold(&format!("tach guard begin {}", rep.goal_name))
+                term::bold(&format!("perdure guard begin {}", rep.goal_name))
             );
             0
         }
@@ -893,16 +893,16 @@ fn cmd_init(rest: &[String]) -> i32 {
     }
 }
 
-/// `tach serve-mcp` — expose Tach's safe guard/goal operations to an external agent
+/// `perdure serve-mcp` — expose Perdure's safe guard/goal operations to an external agent
 /// over the MCP stdio transport. Server-only: no raw shell, no arbitrary file writes.
 fn cmd_serve_mcp(rest: &[String]) -> i32 {
     let p = parse(rest, &[]);
     if p.has("--help") || p.has("-h") {
-        println!("{}", term::bold("tach serve-mcp — MCP server (stdio)"));
+        println!("{}", term::bold("perdure serve-mcp — MCP server (stdio)"));
         println!();
         println!("  Exposes guard/goal operations as MCP tools over stdin/stdout.");
         println!("  Server only: it never runs arbitrary shell or writes files for the agent.");
-        println!("  Point your MCP client at:  tach serve-mcp");
+        println!("  Point your MCP client at:  perdure serve-mcp");
         return 0;
     }
     match mcp::serve(&cwd()) {
@@ -914,7 +914,7 @@ fn cmd_serve_mcp(rest: &[String]) -> i32 {
     }
 }
 
-/// `tach goal init <template>` — (re)write the Tachfile for a coding goal.
+/// `perdure goal init <template>` — (re)write the Perdurefile for a coding goal.
 fn cmd_goal_init(rest: &[String]) -> i32 {
     let p = parse(rest, &[]);
     let id = p
@@ -934,7 +934,7 @@ fn cmd_goal_init(rest: &[String]) -> i32 {
             );
             println!(
                 "  begin with  {}",
-                term::bold(&format!("tach guard begin {name}"))
+                term::bold(&format!("perdure guard begin {name}"))
             );
             0
         }
@@ -955,7 +955,7 @@ fn active_or_pos(p: &Parsed, root: &Path) -> Result<String, i32> {
         Some(id) => Ok(id),
         None => {
             eprintln!(
-                "{} no active guard session — run `tach guard begin <Goal>`",
+                "{} no active guard session — run `perdure guard begin <Goal>`",
                 term::bold_red("error:")
             );
             Err(2)
@@ -991,7 +991,7 @@ fn cmd_guard(rest: &[String]) -> i32 {
         }
         other => {
             eprintln!(
-                "{} unknown `tach guard` subcommand `{}`",
+                "{} unknown `perdure guard` subcommand `{}`",
                 term::bold_red("error:"),
                 other
             );
@@ -1020,7 +1020,7 @@ fn cmd_guard_begin(rest: &[String]) -> i32 {
                 );
                 println!(
                     "  edit files in scope, then  {}",
-                    term::bold("tach guard verify")
+                    term::bold("perdure guard verify")
                 );
             }
             0
@@ -1032,7 +1032,7 @@ fn cmd_guard_begin(rest: &[String]) -> i32 {
     }
 }
 
-/// `tach guard audit` — re-derive the run's ledger integrity from outside the agent.
+/// `perdure guard audit` — re-derive the run's ledger integrity from outside the agent.
 /// Exits non-zero if anything is tampered, so an operator or CI can gate on it.
 fn cmd_guard_audit(rest: &[String]) -> i32 {
     let p = parse(rest, &[]);
@@ -1256,7 +1256,7 @@ fn cmd_guard_verify(rest: &[String]) -> i32 {
                 );
                 println!(
                     "  resume with  {}",
-                    term::bold(&format!("tach guard verify {}", id))
+                    term::bold(&format!("perdure guard verify {}", id))
                 );
                 CRASH_EXIT
             }
@@ -1333,7 +1333,7 @@ fn cmd_guard_commit(rest: &[String]) -> i32 {
                 print_json(&out);
             } else if out.ok {
                 println!(
-                    "  {} finalized — run {} is {} (Tach ledger only; git untouched)",
+                    "  {} finalized — run {} is {} (Perdure ledger only; git untouched)",
                     term::green("✓"),
                     out.run_id,
                     out.status
@@ -1388,7 +1388,7 @@ fn cmd_guard_abort(rest: &[String]) -> i32 {
 }
 
 fn print_guard_help() {
-    println!("{}", term::bold("tach guard — coding-agent session"));
+    println!("{}", term::bold("perdure guard — coding-agent session"));
     println!();
     println!("  begin <Goal>     open a session over the working tree");
     println!("  status [--json]  phase, verified bit, command counts");
@@ -1397,13 +1397,13 @@ fn print_guard_help() {
     println!("  next [--json]    the single next required action for an agent");
     println!("  diff [--json]    changed files, classified by scope");
     println!("  verify [--rerun] run required commands; set the verified bit");
-    println!("  finalize         finalize verified changes into Tach's ledger (never git)");
+    println!("  finalize         finalize verified changes into Perdure's ledger (never git)");
     println!("  commit           alias for finalize (ledger-only, never git)");
     println!("  abort            cancel the session");
     println!("  audit [--json]   verify the ledger is untampered (chain + receipts + state)");
 }
 
-/// `tach goal` with no subcommand: list the goals declared in this workspace.
+/// `perdure goal` with no subcommand: list the goals declared in this workspace.
 fn cmd_goal_overview() -> i32 {
     let ws = match project::load_workspace(&cwd()) {
         Ok(w) => w,
@@ -1453,7 +1453,7 @@ fn cmd_goal_overview() -> i32 {
     println!();
 
     // Built-in plan goals: durable workflows with control flow (loops, branches,
-    // per-iteration approval gates) written in the Tach plan language.
+    // per-iteration approval gates) written in the Perdure plan language.
     println!("{}", term::bold("built-in plan goals"));
     println!();
     for name in plan::builtin_plan_goal_names() {
@@ -1470,7 +1470,7 @@ fn cmd_goal_overview() -> i32 {
         }
     }
     println!();
-    println!("  run one with  {}", term::bold("tach goal run <name>"));
+    println!("  run one with  {}", term::bold("perdure goal run <name>"));
     0
 }
 
@@ -1481,7 +1481,7 @@ fn parse_crash_after(p: &Parsed) -> Option<u64> {
     n.parse().ok()
 }
 
-/// The guard analog of `parse_crash_after`: `tach guard verify --crash-after
+/// The guard analog of `parse_crash_after`: `perdure guard verify --crash-after
 /// receipt:N` (bare `N` also accepted) stops right after the Nth command receipt.
 fn parse_guard_crash(p: &Parsed) -> Option<usize> {
     let raw = p.get("--crash-after")?;
@@ -1495,7 +1495,7 @@ fn cmd_goal_run(rest: &[String]) -> i32 {
         Some(n) => n.clone(),
         None => {
             eprintln!(
-                "{} usage: tach goal run <name> [--strategy s] [--crash-after step:N]",
+                "{} usage: perdure goal run <name> [--strategy s] [--crash-after step:N]",
                 term::bold_red("error:")
             );
             return 2;
@@ -1605,7 +1605,7 @@ fn cmd_goal_run(rest: &[String]) -> i32 {
             if let Ok(s) = store::load_state(&root, id) {
                 if matches!(s.status.as_str(), "running" | "budget_exhausted") {
                     println!(
-                        "    {} `{}` is {} — resume it with `tach goal resume {}`",
+                        "    {} `{}` is {} — resume it with `perdure goal resume {}`",
                         term::dim("·"),
                         id,
                         s.status,
@@ -1645,7 +1645,7 @@ fn cmd_goal_resume(rest: &[String]) -> i32 {
         Some(i) => i.clone(),
         None => {
             eprintln!(
-                "{} usage: tach goal resume <run-id>",
+                "{} usage: perdure goal resume <run-id>",
                 term::bold_red("error:")
             );
             return 2;
@@ -1686,14 +1686,14 @@ fn cmd_goal_resume(rest: &[String]) -> i32 {
     finish_run(&root, result, dry)
 }
 
-/// `tach goal check <name>` — statically validate a workspace goal (its plan, if it
-/// has one) before any run. A focused view of the same checks `tach check` runs.
+/// `perdure goal check <name>` — statically validate a workspace goal (its plan, if it
+/// has one) before any run. A focused view of the same checks `perdure check` runs.
 fn cmd_goal_check(rest: &[String]) -> i32 {
     let p = parse(rest, &[]);
     let name = match p.pos.first() {
         Some(n) => n.clone(),
         None => {
-            eprintln!("{} usage: tach goal check <name>", term::bold_red("error:"));
+            eprintln!("{} usage: perdure goal check <name>", term::bold_red("error:"));
             return 2;
         }
     };
@@ -1779,7 +1779,7 @@ fn finish_run(root: &Path, result: runtime::RunResult, dry: bool) -> i32 {
         );
         println!(
             "  resume with  {}",
-            term::bold(&format!("tach goal resume {}", st.run_id))
+            term::bold(&format!("perdure goal resume {}", st.run_id))
         );
         return CRASH_EXIT;
     }
@@ -1788,7 +1788,7 @@ fn finish_run(root: &Path, result: runtime::RunResult, dry: bool) -> i32 {
         println!(
             "\n  {} awaiting approval — review with {}",
             term::bold_yellow("⏸"),
-            term::bold(&format!("tach goal approvals {}", st.run_id))
+            term::bold(&format!("perdure goal approvals {}", st.run_id))
         );
         return 0;
     }
@@ -1802,7 +1802,7 @@ fn finish_run(root: &Path, result: runtime::RunResult, dry: bool) -> i32 {
                     "\n  {} goal completed — {} receipt(s). See {}",
                     term::green("✓"),
                     st.receipts_created,
-                    term::bold(&format!("tach goal receipts {}", st.run_id))
+                    term::bold(&format!("perdure goal receipts {}", st.run_id))
                 );
                 0
             }
@@ -1834,7 +1834,7 @@ fn cmd_goal_list(_rest: &[String]) -> i32 {
     let ids = store::list_runs(&root);
     if ids.is_empty() {
         println!(
-            "  {} no goal runs yet — start one with `tach goal run <name>`",
+            "  {} no goal runs yet — start one with `perdure goal run <name>`",
             term::dim("·")
         );
         return 0;
@@ -1865,7 +1865,7 @@ fn cmd_goal_inspect(rest: &[String]) -> i32 {
         Some(i) => i.clone(),
         None => {
             eprintln!(
-                "{} usage: tach goal inspect <run-id>",
+                "{} usage: perdure goal inspect <run-id>",
                 term::bold_red("error:")
             );
             return 2;
@@ -1908,7 +1908,7 @@ fn cmd_goal_replay(rest: &[String]) -> i32 {
         Some(i) => i.clone(),
         None => {
             eprintln!(
-                "{} usage: tach goal replay <run-id> [--rerun]",
+                "{} usage: perdure goal replay <run-id> [--rerun]",
                 term::bold_red("error:")
             );
             return 2;
@@ -1951,7 +1951,7 @@ fn cmd_goal_cancel(rest: &[String]) -> i32 {
         Some(i) => i.clone(),
         None => {
             eprintln!(
-                "{} usage: tach goal cancel <run-id>",
+                "{} usage: perdure goal cancel <run-id>",
                 term::bold_red("error:")
             );
             return 2;
@@ -1993,7 +1993,7 @@ fn cmd_goal_approvals(rest: &[String]) -> i32 {
         Some(i) => i.clone(),
         None => {
             eprintln!(
-                "{} usage: tach goal approvals <run-id>",
+                "{} usage: perdure goal approvals <run-id>",
                 term::bold_red("error:")
             );
             return 2;
@@ -2036,9 +2036,9 @@ fn decide_approval(rest: &[String], decision: &str) -> i32 {
     let p = parse(rest, &["--note", "--reason"]);
     let granting = decision == "granted";
     let usage = if granting {
-        "tach goal approve <run-id> <approval-id> [--note ...]"
+        "perdure goal approve <run-id> <approval-id> [--note ...]"
     } else {
-        "tach goal deny <run-id> <approval-id> [--reason ...]"
+        "perdure goal deny <run-id> <approval-id> [--reason ...]"
     };
     let (id, apr_id) = match two_positionals(&p, usage) {
         Some(v) => v,
@@ -2101,7 +2101,7 @@ fn decide_approval(rest: &[String], decision: &str) -> i32 {
             "  {} approved `{}` — resume with {}",
             term::green("✓"),
             apr_id,
-            term::bold(&format!("tach goal resume {}", id))
+            term::bold(&format!("perdure goal resume {}", id))
         );
     } else {
         println!(
@@ -2120,7 +2120,7 @@ fn cmd_goal_receipts(rest: &[String]) -> i32 {
         Some(i) => i.clone(),
         None => {
             eprintln!(
-                "{} usage: tach goal receipts <run-id>",
+                "{} usage: perdure goal receipts <run-id>",
                 term::bold_red("error:")
             );
             return 2;
@@ -2145,7 +2145,7 @@ fn cmd_goal_receipts(rest: &[String]) -> i32 {
 
 fn cmd_goal_receipt(rest: &[String]) -> i32 {
     let p = parse(rest, &[]);
-    let (id, rid) = match two_positionals(&p, "tach goal receipt <run-id> <receipt-id> [--json]") {
+    let (id, rid) = match two_positionals(&p, "perdure goal receipt <run-id> <receipt-id> [--json]") {
         Some(v) => v,
         None => return 2,
     };
@@ -2192,7 +2192,7 @@ fn print_goal_help() {
     );
     cmd(
         "goal init <template>",
-        "write a Tachfile coding goal (e.g. coding.fix-tests)",
+        "write a Perdurefile coding goal (e.g. coding.fix-tests)",
     );
     cmd(
         "goal check <name>",
@@ -2227,7 +2227,7 @@ fn print_goal_help() {
 
 fn cmd_doctor(_rest: &[String]) -> i32 {
     let root = cwd();
-    println!("{}", term::bold("tach doctor"));
+    println!("{}", term::bold("perdure doctor"));
     println!(
         "  {}",
         term::dim("a hermetic health check — no network, no clock, no services")
@@ -2247,7 +2247,7 @@ fn cmd_doctor(_rest: &[String]) -> i32 {
         println!("  {} {:<22} {}", term::bold_yellow("!"), label, detail);
     };
 
-    ok("version", format!("tach {}", env!("CARGO_PKG_VERSION")));
+    ok("version", format!("perdure {}", env!("CARGO_PKG_VERSION")));
     ok(
         "determinism",
         "fixed clock, no randomness, byte-exact replay".into(),
@@ -2255,17 +2255,17 @@ fn cmd_doctor(_rest: &[String]) -> i32 {
 
     match project::load_workspace(&root) {
         Ok(ws) if ws.files.is_empty() => {
-            warn("workspace", "no .tach files found here".into());
+            warn("workspace", "no .pdr files found here".into());
         }
         Ok(ws) => {
-            ok("workspace", format!("{} .tach file(s)", ws.files.len()));
+            ok("workspace", format!("{} .pdr file(s)", ws.files.len()));
             let (prog, pdiags) = ws.program();
             let errs = pdiags.iter().filter(|d| d.is_error()).count()
                 + check_program(&prog).iter().filter(|d| d.is_error()).count();
             if errs == 0 {
                 ok("check", "no errors".into());
             } else {
-                warn("check", format!("{} error(s) — run `tach check`", errs));
+                warn("check", format!("{} error(s) — run `perdure check`", errs));
                 problems += 1;
             }
             let goals = goal::all_goals(&prog).len();
@@ -2278,11 +2278,11 @@ fn cmd_doctor(_rest: &[String]) -> i32 {
     }
 
     // The store directory must be writable for goal runs to be durable.
-    let tach_dir = root.join(".tach");
-    match std::fs::create_dir_all(&tach_dir) {
-        Ok(_) => ok("store", ".tach is writable".into()),
+    let perdure_dir = root.join(".perdure");
+    match std::fs::create_dir_all(&perdure_dir) {
+        Ok(_) => ok("store", ".perdure is writable".into()),
         Err(e) => {
-            warn("store", format!(".tach not writable: {}", e));
+            warn("store", format!(".perdure not writable: {}", e));
             problems += 1;
         }
     }
@@ -2310,7 +2310,7 @@ fn cmd_explain(rest: &[String]) -> i32 {
         Some(c) => c.to_uppercase(),
         None => {
             eprintln!(
-                "{} usage: tach explain <diagnostic-code>  e.g. tach explain E0421",
+                "{} usage: perdure explain <diagnostic-code>  e.g. perdure explain E0421",
                 term::bold_red("error:")
             );
             return 2;
@@ -2345,7 +2345,7 @@ fn explanation(code: &str) -> Option<(&'static str, &'static str)> {
              for example a function annotated `-> String` whose body returns an `Int`.\n\n\
              The diagnostic carries a `preferred_patch` that repairs the smaller side:\n\
              usually the annotation. The `convert` repair strategy instead wraps the\n\
-             value (e.g. `to_string(x)`), which `tach race` can weigh against the minimal fix.",
+             value (e.g. `to_string(x)`), which `perdure race` can weigh against the minimal fix.",
         ),
         "E0322" => (
             "unknown_module",
@@ -2388,7 +2388,7 @@ fn cmd_schema(rest: &[String]) -> i32 {
                 println!("  {:<12} {}", term::bold(s.name), term::dim(s.title));
             }
             println!();
-            println!("  print one with  {}", term::bold("tach schema <name>"));
+            println!("  print one with  {}", term::bold("perdure schema <name>"));
             0
         }
         Some(name) => match schema::get(name) {
@@ -2419,7 +2419,7 @@ fn print_help() {
     let b = |s: &str| term::bold(s);
     println!(
         "{}",
-        term::bold("tach — a typed goal runtime for long-horizon agents")
+        term::bold("perdure — a typed goal runtime for long-horizon agents")
     );
     println!(
         "{}",
@@ -2427,7 +2427,7 @@ fn print_help() {
     );
     println!();
     println!("{}", b("USAGE"));
-    println!("  tach <command> [args]");
+    println!("  perdure <command> [args]");
     println!();
     println!("{}", b("COMMANDS"));
     let cmd = |name: &str, desc: &str| println!("  {:<16} {}", name, term::dim(desc));
@@ -2437,7 +2437,7 @@ fn print_help() {
     );
     cmd(
         "init --existing",
-        "adopt an existing repo: write Tachfile, TACH_AGENT.md, .tachignore",
+        "adopt an existing repo: write Perdurefile, PERDURE_AGENT.md, .perdureignore",
     );
     cmd(
         "guard <sub>",
@@ -2491,24 +2491,24 @@ fn print_help() {
     cmd("version", "print the version");
     println!();
     println!("{}", b("EXAMPLE"));
-    println!("  tach new demo && cd demo");
+    println!("  perdure new demo && cd demo");
     println!(
-        "  tach check        {}",
+        "  perdure check        {}",
         term::dim("# 3 structured diagnostics")
     );
-    println!("  tach fix          {}", term::dim("# green in 3 laps"));
+    println!("  perdure fix          {}", term::dim("# green in 3 laps"));
     println!();
     println!("{}", b("GOAL RUNTIME"));
     println!(
-        "  tach goal run FixFailingTests --crash-after step:2   {}",
+        "  perdure goal run FixFailingTests --crash-after step:2   {}",
         term::dim("# durable, crashes mid-run")
     );
     println!(
-        "  tach goal resume <id>                                {}",
+        "  perdure goal resume <id>                                {}",
         term::dim("# picks up — no repeated work")
     );
     println!(
-        "  tach goal inspect <id>                               {}",
+        "  perdure goal inspect <id>                               {}",
         term::dim("# state + event history")
     );
 }

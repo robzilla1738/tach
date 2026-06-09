@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://tach.dev/schemas/guard-status.schema.json",
-  "title": "Tach Guard Status",
-  "description": "A compact status line for a guard session (`tach guard status --json`). The single bit an integrator trusts is `verified`; the counts make the verdict auditable at a glance (how many required commands there are, how many passed, how many out-of-scope edits are currently present, and how many receipts have been minted).",
+  "$id": "https://perdure.dev/schemas/guard-status.schema.json",
+  "title": "Perdure Guard Status",
+  "description": "A compact status line for a guard session (`perdure guard status --json`). The single bit an integrator trusts is `verified`; the counts make the verdict auditable at a glance (how many required commands there are, how many passed, how many out-of-scope edits are currently present, and how many receipts have been minted).",
   "type": "object",
   "required": ["run_id", "goal", "phase", "verified", "commands_required", "commands_passed", "out_of_scope", "receipts", "step"],
   "additionalProperties": false,

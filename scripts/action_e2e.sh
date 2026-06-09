@@ -9,7 +9,7 @@ export NO_COLOR=1
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cargo build --release --manifest-path "$ROOT/Cargo.toml"
-BIN="$ROOT/target/release/tach"
+BIN="$ROOT/target/release/perdure"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -19,7 +19,7 @@ status_of() {
   "$BIN" goal inspect "$1" --json | python3 -c 'import sys,json; print(json.load(sys.stdin)["state"]["status"])'
 }
 
-echo "## tach goal run ResolveDuplicateCharge  (expect a pause at the refund gate)"
+echo "## perdure goal run ResolveDuplicateCharge  (expect a pause at the refund gate)"
 "$BIN" goal run ResolveDuplicateCharge >/dev/null
 RUN_ID="$("$BIN" goal list | awk '/run_/ {print $1; exit}')"
 echo "## run id: $RUN_ID"
@@ -31,10 +31,10 @@ fi
 echo "   ok — paused awaiting approval"
 
 APR="$("$BIN" goal approvals "$RUN_ID" | grep -oE 'apr_[a-f0-9]+' | head -1)"
-echo "## tach goal approve $RUN_ID $APR"
+echo "## perdure goal approve $RUN_ID $APR"
 "$BIN" goal approve "$RUN_ID" "$APR" >/dev/null
 
-echo "## tach goal resume $RUN_ID --crash-after step:4  (expect a durable crash)"
+echo "## perdure goal resume $RUN_ID --crash-after step:4  (expect a durable crash)"
 set +e
 "$BIN" goal resume "$RUN_ID" --crash-after step:4 >/dev/null
 CODE=$?
@@ -45,7 +45,7 @@ if [ "$CODE" -ne 99 ]; then
 fi
 echo "   ok — crashed after the refund, state durable"
 
-echo "## tach goal resume $RUN_ID  (expect completion)"
+echo "## perdure goal resume $RUN_ID  (expect completion)"
 "$BIN" goal resume "$RUN_ID" >/dev/null
 if [ "$(status_of "$RUN_ID")" != "completed" ]; then
   echo "FAIL: expected completed, got $(status_of "$RUN_ID")"
@@ -74,7 +74,7 @@ if [ "$REFUNDS" -ne 1 ]; then
 fi
 echo "   ok — exactly one durable refund receipt"
 
-echo "## tach goal replay $RUN_ID  (expect exact reproduction)"
+echo "## perdure goal replay $RUN_ID  (expect exact reproduction)"
 "$BIN" goal replay "$RUN_ID"
 
 echo

@@ -7,17 +7,17 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cargo build --release --manifest-path "$ROOT/Cargo.toml"
-BIN="$ROOT/target/release/tach"
+BIN="$ROOT/target/release/perdure"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 cd "$WORK"
 
-echo "## tach new demo"
+echo "## perdure new demo"
 "$BIN" new demo >/dev/null
 cd demo
 
-echo "## tach goal run FixFailingTests --crash-after step:2  (expect a durable crash)"
+echo "## perdure goal run FixFailingTests --crash-after step:2  (expect a durable crash)"
 set +e
 "$BIN" goal run FixFailingTests --crash-after step:2
 CODE=$?
@@ -31,20 +31,20 @@ echo "   ok — crashed mid-run as expected (exit 99)"
 RUN_ID="$("$BIN" goal list | awk '/run_/ {print $1; exit}')"
 echo "## run id: $RUN_ID"
 
-echo "## tach check  (expect STILL RED — a crash must not leave a half-edited tree)"
+echo "## perdure check  (expect STILL RED — a crash must not leave a half-edited tree)"
 if "$BIN" check >/dev/null 2>&1; then
   echo "FAIL: working tree went green after a crash — it should be untouched"
   exit 1
 fi
 echo "   ok — working tree untouched by the crash"
 
-echo "## tach goal resume $RUN_ID  (expect completion, no repeated work)"
+echo "## perdure goal resume $RUN_ID  (expect completion, no repeated work)"
 "$BIN" goal resume "$RUN_ID"
 
-echo "## tach check  (expect GREEN — verified result written back)"
+echo "## perdure check  (expect GREEN — verified result written back)"
 "$BIN" check
 
-echo "## tach test   (expect all green)"
+echo "## perdure test   (expect all green)"
 "$BIN" test
 
 echo "## assert exactly 3 patches were applied across the whole run (no duplication)"
@@ -55,7 +55,7 @@ if [ "$APPLIED" -ne 3 ]; then
 fi
 echo "   ok — 3 patches applied, none repeated across the crash boundary"
 
-echo "## tach goal replay $RUN_ID  (expect exact reproduction)"
+echo "## perdure goal replay $RUN_ID  (expect exact reproduction)"
 "$BIN" goal replay "$RUN_ID"
 
 echo

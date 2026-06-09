@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://tach.dev/schemas/diagnostic.schema.json",
-  "title": "Tach Diagnostic",
-  "description": "A single structured compiler diagnostic. Emitted by `tach check --json`. The agent-facing fields (kind, repair_strategies, preferred_patch) are first-class.",
+  "$id": "https://perdure.dev/schemas/diagnostic.schema.json",
+  "title": "Perdure Diagnostic",
+  "description": "A single structured compiler diagnostic. Emitted by `perdure check --json`. The agent-facing fields (kind, repair_strategies, preferred_patch) are first-class.",
   "type": "object",
   "required": ["code", "severity", "kind", "message", "file", "span"],
   "additionalProperties": false,

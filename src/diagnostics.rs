@@ -11,7 +11,7 @@ pub enum Severity {
 }
 
 /// A concrete, machine-applicable edit the compiler believes will repair a
-/// diagnostic. This is the heart of Tach's agent-native story: the compiler does
+/// diagnostic. This is the heart of Perdure's agent-native story: the compiler does
 /// not merely point at a problem, it proposes a span-replacement an agent can
 /// apply verbatim.
 #[derive(Clone, Debug, Serialize, Deserialize)]

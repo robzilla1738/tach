@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://tach.dev/schemas/goal.schema.json",
-  "title": "Tach Goal Spec",
+  "$id": "https://perdure.dev/schemas/goal.schema.json",
+  "title": "Perdure Goal Spec",
   "description": "The resolved, runtime-facing contract of a `goal` declaration: the budget it may spend, the authority it is granted, and the conditions required for success.",
   "type": "object",
   "required": ["name", "budget", "allow", "require"],

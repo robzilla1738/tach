@@ -1,7 +1,7 @@
 use crate::ast::{TypeDecl, TypeExpr};
 use std::collections::HashMap;
 
-/// A resolved Tach type.
+/// A resolved Perdure type.
 ///
 /// `Unknown` is the inference/error-recovery hole and is compatible with
 /// everything — the checker stays lenient so it only ever reports a type error

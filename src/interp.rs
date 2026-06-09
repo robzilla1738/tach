@@ -73,7 +73,7 @@ impl Env {
 /// The tree-walking interpreter.
 ///
 /// Fully deterministic: a fixed clock, no randomness, no real I/O. That is what
-/// makes `tach replay` reproduce a run exactly and what makes the agent loop's
+/// makes `perdure replay` reproduce a run exactly and what makes the agent loop's
 /// metrics trustworthy.
 pub struct Interp<'a> {
     funcs: HashMap<String, &'a FnDecl>,
@@ -604,7 +604,7 @@ fn binop_str(op: BinOp) -> &'static str {
     }
 }
 
-/// Render an expression back to readable Tach source — used for `ensure` failure
+/// Render an expression back to readable Perdure source — used for `ensure` failure
 /// messages so the report reads like the code the author wrote.
 pub fn render_expr(e: &Expr) -> String {
     match e {

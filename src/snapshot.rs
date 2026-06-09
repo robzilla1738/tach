@@ -1,6 +1,6 @@
 //! Real-filesystem snapshots for the coding harness.
 //!
-//! A guard session needs a baseline of the working tree taken at `tach guard
+//! A guard session needs a baseline of the working tree taken at `perdure guard
 //! begin`, so that later it can tell exactly which files the external agent
 //! touched and check each against the goal's `fs.write` scope. We capture that
 //! baseline as a *manifest*: a map of repo-relative path -> a small entry (a
@@ -8,7 +8,7 @@
 //! contents, so the baseline of a 50k-file repo is still small — and the diff is a
 //! cheap map comparison.
 //!
-//! The walk hard-excludes only `.git` and `.tach` — git's own store and Tach's own
+//! The walk hard-excludes only `.git` and `.perdure` — git's own store and Perdure's own
 //! run state, which churns every `verify`. Everything else, *including* dotdirs
 //! like `.github/` and `.vscode/`, is walked and scope-checked: an agent that edits
 //! CI config or an editor hook must be visible to the gate. Heavy build/dependency
@@ -78,7 +78,7 @@ impl ManifestEntry {
 
 /// Custom `Deserialize` that also accepts a **legacy** bare-string value — the old
 /// manifest stored `path -> content_hash` directly — so a baseline written by an
-/// earlier Tach still loads as `{ File, Some(hash), .. }`. Same back-compat posture
+/// earlier Perdure still loads as `{ File, Some(hash), .. }`. Same back-compat posture
 /// as the `#[serde(default)]` fields on `RunState`.
 impl<'de> Deserialize<'de> for ManifestEntry {
     fn deserialize<D>(d: D) -> Result<Self, D::Error>
@@ -121,10 +121,10 @@ impl<'de> Deserialize<'de> for ManifestEntry {
     }
 }
 
-/// Directory/dependency roots ignored by default — even with no `.tachignore` — so
+/// Directory/dependency roots ignored by default — even with no `.perdureignore` — so
 /// a snapshot never walks a giant `target/` or `node_modules/`. Unlike the hard
 /// excludes, these are ordinary globs the user can shadow or extend via
-/// `.tachignore`; they are not dotdir-based, so `.github`, `.vscode`, `.circleci`
+/// `.perdureignore`; they are not dotdir-based, so `.github`, `.vscode`, `.circleci`
 /// and friends are deliberately absent and therefore tracked.
 const DEFAULT_SOFT_IGNORES: &[&str] = &[
     "target",
@@ -136,7 +136,7 @@ const DEFAULT_SOFT_IGNORES: &[&str] = &[
 ];
 
 /// The ignore set governing a walk: the built-in soft defaults plus any
-/// `.tachignore` lines. The two hard excludes (`.git`, `.tach`) are enforced by the
+/// `.perdureignore` lines. The two hard excludes (`.git`, `.perdure`) are enforced by the
 /// walk itself, not represented here, so nothing can override them.
 #[derive(Debug)]
 pub struct Ignore {
@@ -157,11 +157,11 @@ impl Default for Ignore {
 }
 
 impl Ignore {
-    /// Load `<repo>/.tachignore` on top of the built-in soft defaults, ignoring
+    /// Load `<repo>/.perdureignore` on top of the built-in soft defaults, ignoring
     /// blank lines and `#` comments. A missing file yields just the defaults.
     pub fn load(repo: &Path) -> Self {
         let mut ig = Ignore::default();
-        if let Ok(text) = fs::read_to_string(repo.join(".tachignore")) {
+        if let Ok(text) = fs::read_to_string(repo.join(".perdureignore")) {
             for line in text.lines() {
                 let l = line.trim();
                 if l.is_empty() || l.starts_with('#') {
@@ -175,17 +175,17 @@ impl Ignore {
         ig
     }
 
-    /// Does any ignore pattern (default or `.tachignore`) match this path?
+    /// Does any ignore pattern (default or `.perdureignore`) match this path?
     ///
-    /// Two files are **never** ignored, at any depth: `.tachignore` and `.gitignore`.
-    /// They *define* the gate's blind spots — `.tachignore` what the scope gate skips,
+    /// Two files are **never** ignored, at any depth: `.perdureignore` and `.gitignore`.
+    /// They *define* the gate's blind spots — `.perdureignore` what the scope gate skips,
     /// `.gitignore` what a human will commit — so a silent edit to either is exactly
     /// what an audit must see. Refusing to ignore them means an agent can't shrink the
     /// gate's view by editing the very file that configures it (belt-and-suspenders to
     /// the frozen baseline, which already pins the rules captured at `begin`).
     pub fn matches(&self, rel: &str) -> bool {
         let base = rel.rsplit('/').next().unwrap_or(rel);
-        if matches!(base, ".tachignore" | ".gitignore") {
+        if matches!(base, ".perdureignore" | ".gitignore") {
             return false;
         }
         self.globs.iter().any(|g| glob_match(g, rel))
@@ -193,7 +193,7 @@ impl Ignore {
 
     /// The resolved glob set, for **freezing** into a run's baseline so every later
     /// scope diff classifies against the rules captured at `begin` — never a live,
-    /// agent-editable `.tachignore`. Round-trips through [`Ignore::from_globs`].
+    /// agent-editable `.perdureignore`. Round-trips through [`Ignore::from_globs`].
     pub fn globs(&self) -> &[String] {
         &self.globs
     }
@@ -204,12 +204,12 @@ impl Ignore {
     }
 }
 
-/// Directory names the walk *never* descends into, regardless of `.tachignore`:
-/// git's own store and Tach's own run state. Everything else — including dotdirs
+/// Directory names the walk *never* descends into, regardless of `.perdureignore`:
+/// git's own store and Perdure's own run state. Everything else — including dotdirs
 /// like `.github` and `.vscode` — is walked, so edits there are seen and
 /// scope-checked.
 fn is_hard_excluded_dir(name: &str) -> bool {
-    matches!(name, ".git" | ".tach")
+    matches!(name, ".git" | ".perdure")
 }
 
 /// SHA-256 hex digest of a file's bytes — a **cryptographic** hash, deliberately not
@@ -363,7 +363,7 @@ mod tests {
             static N: AtomicU64 = AtomicU64::new(0);
             let n = N.fetch_add(1, Ordering::Relaxed);
             let dir = std::env::temp_dir().join(format!(
-                "tach_snap_{}_{}_{}",
+                "perdure_snap_{}_{}_{}",
                 std::process::id(),
                 tag,
                 n
@@ -395,24 +395,24 @@ mod tests {
         d.write("target/debug/junk", "x"); // soft default → skipped
         d.write("node_modules/pkg/index.js", "x"); // soft default → skipped
         d.write(".git/config", "x"); // hard exclude → skipped
-        d.write(".tach/goals/run/state.json", "x"); // hard exclude → skipped
+        d.write(".perdure/goals/run/state.json", "x"); // hard exclude → skipped
         let m = snapshot(d.path(), &Ignore::default()).unwrap();
         assert!(m.contains_key("src/lib.rs"));
         assert!(m.contains_key("README.md"));
         assert!(!m.keys().any(|k| k.starts_with("target/")));
         assert!(!m.keys().any(|k| k.starts_with("node_modules/")));
         assert!(!m.keys().any(|k| k.starts_with(".git/")));
-        assert!(!m.keys().any(|k| k.starts_with(".tach/")));
+        assert!(!m.keys().any(|k| k.starts_with(".perdure/")));
     }
 
     #[test]
-    fn dotdirs_other_than_git_and_tach_are_tracked() {
+    fn dotdirs_other_than_git_and_perdure_are_tracked() {
         let d = TempDir::new("dotdirs");
         d.write(".github/workflows/ci.yml", "on: push\n");
         d.write(".vscode/settings.json", "{}");
         d.write(".circleci/config.yml", "version: 2\n");
         d.write(".git/config", "x"); // still invisible
-        d.write(".tach/x", "x"); // still invisible
+        d.write(".perdure/x", "x"); // still invisible
         let m = snapshot(d.path(), &Ignore::default()).unwrap();
         assert!(
             m.contains_key(".github/workflows/ci.yml"),
@@ -421,13 +421,13 @@ mod tests {
         assert!(m.contains_key(".vscode/settings.json"));
         assert!(m.contains_key(".circleci/config.yml"));
         assert!(!m.keys().any(|k| k.starts_with(".git/")));
-        assert!(!m.keys().any(|k| k.starts_with(".tach/")));
+        assert!(!m.keys().any(|k| k.starts_with(".perdure/")));
     }
 
     #[test]
-    fn tachignore_excludes_matches() {
+    fn perdureignore_excludes_matches() {
         let d = TempDir::new("ignore");
-        d.write(".tachignore", "# comment\ncoverage\n*.log\n");
+        d.write(".perdureignore", "# comment\ncoverage\n*.log\n");
         d.write("src/lib.rs", "x");
         d.write("coverage/report.html", "x");
         d.write("debug.log", "x");
@@ -457,7 +457,7 @@ mod tests {
 
     #[test]
     fn legacy_bare_string_baseline_deserializes() {
-        // A baseline written by an earlier Tach: path -> content hash string.
+        // A baseline written by an earlier Perdure: path -> content hash string.
         let legacy = r#"{"src/lib.rs":"00000000deadbeef","README.md":"0000000012345678"}"#;
         let m: Manifest = serde_json::from_str(legacy).unwrap();
         let e = m.get("src/lib.rs").unwrap();

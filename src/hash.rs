@@ -1,6 +1,6 @@
 //! SHA-256 (FIPS 180-4), hand-rolled and dependency-free.
 //!
-//! This is the **cryptographic** digest Tach reaches for wherever a hash must resist
+//! This is the **cryptographic** digest Perdure reaches for wherever a hash must resist
 //! a *crafted* collision rather than merely distribute well: the coding harness's
 //! content hashes (so an adversarial agent can't craft an out-of-scope edit that
 //! hashes equal to the baseline and slips the scope gate), the receipt `input_hash`,

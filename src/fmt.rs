@@ -1,6 +1,6 @@
-//! The one Tach formatter.
+//! The one Perdure formatter.
 //!
-//! `tach fmt` renders the AST back to a single canonical spelling, so there is
+//! `perdure fmt` renders the AST back to a single canonical spelling, so there is
 //! never an argument about layout — the same program always formats the same
 //! way. The output is deterministic and idempotent: formatting formatted source
 //! is a no-op. Rendering is precedence-aware, so it only parenthesizes where
@@ -14,7 +14,7 @@ const STEP: usize = 2;
 /// Why a file was left unformatted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Skip {
-    /// The file has syntax errors — `tach check` will explain.
+    /// The file has syntax errors — `perdure check` will explain.
     ParseError,
     /// The file has comments, which the AST does not yet carry. Reformatting
     /// would delete them, so we refuse to touch it. (Comment-preserving
@@ -540,11 +540,11 @@ mod tests {
     use super::*;
 
     fn roundtrips(src: &str) -> String {
-        let once = format_file("t.tach", src).expect("formats");
-        let twice = format_file("t.tach", &once).expect("re-formats");
+        let once = format_file("t.pdr", src).expect("formats");
+        let twice = format_file("t.pdr", &once).expect("re-formats");
         assert_eq!(once, twice, "formatter is not idempotent");
         // formatted source must still parse cleanly
-        let (_, diags) = parse("t.tach", &once);
+        let (_, diags) = parse("t.pdr", &once);
         assert!(
             diags.iter().all(|d| !d.is_error()),
             "formatted source has parse errors: {:?}",
@@ -602,12 +602,12 @@ mod tests {
     fn already_formatted_is_a_fixed_point() {
         // The (comment-free) clean scaffold templates must already be canonical.
         for (name, src) in [
-            ("main.tach", crate::project::CLEAN_MAIN),
-            ("main_test.tach", crate::project::CLEAN_TEST),
-            ("goal.tach", crate::project::DEMO_GOAL),
+            ("main.pdr", crate::project::CLEAN_MAIN),
+            ("main_test.pdr", crate::project::CLEAN_TEST),
+            ("goal.pdr", crate::project::DEMO_GOAL),
             // Plan goals must round-trip too — the formatter renders the whole
             // `plan { … }` block and never drops it.
-            ("plan_demo.tach", crate::project::PLAN_DEMO_CHARGEBACKS),
+            ("plan_demo.pdr", crate::project::PLAN_DEMO_CHARGEBACKS),
         ] {
             let out = format_file(name, src).expect("formats");
             assert_eq!(out, src, "{} should be a formatting fixed point", name);
@@ -617,7 +617,7 @@ mod tests {
     #[test]
     fn corpus_is_canonically_formatted() {
         // Guards that every committed corpus file stays in canonical form — the
-        // same guarantee `tach fmt --check corpus` gives, run hermetically in CI.
+        // same guarantee `perdure fmt --check corpus` gives, run hermetically in CI.
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus");
         let cases = crate::project::load_suite(&dir).expect("load corpus");
         for (name, ws) in cases {
@@ -635,7 +635,7 @@ mod tests {
     fn refuses_to_eat_comments() {
         // A file with comments is skipped, never reformatted — no data loss.
         let src = "// a note\nfn f() -> Int {\n  return 1\n}\n";
-        assert_eq!(format_file("c.tach", src), Err(Skip::HasComments));
+        assert_eq!(format_file("c.pdr", src), Err(Skip::HasComments));
         // but `//` inside a string is not a comment.
         assert!(!has_line_comment(
             "fn f() -> String { return \"http://x\" }"

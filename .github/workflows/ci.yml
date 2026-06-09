@@ -49,6 +49,9 @@ jobs:
       - name: End-to-end user-authored plan goal (scaffold → check → crash → snapshot-beats-live-edit → replay)
         run: bash scripts/user_plan_e2e.sh
 
+      - name: End-to-end guard (existing repo: adopt → verify → crash/resume → commit → out-of-scope reject → replay)
+        run: bash scripts/guard_e2e.sh
+
       - name: Tach format check (corpus)
         run: |
           for d in corpus/*/; do
@@ -58,7 +61,8 @@ jobs:
       - name: Schemas are valid JSON and match emitted samples
         run: |
           BIN="$GITHUB_WORKSPACE/target/release/tach"
-          for name in diagnostic patch event goal run approval receipt bench test; do
+          for name in diagnostic patch event goal run approval receipt bench test \
+                      guard-context guard-status guard-diff guard-verify guard-commit; do
             "$BIN" schema "$name" | python3 -c 'import sys, json; json.load(sys.stdin)'
           done
           echo "all published schemas are valid JSON"

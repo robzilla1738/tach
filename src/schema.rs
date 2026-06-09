@@ -60,6 +60,31 @@ pub const SCHEMAS: &[Schema] = &[
         title: "test report (`tach test --json`)",
         json: include_str!("../schemas/test.schema.json"),
     },
+    Schema {
+        name: "guard-context",
+        title: "guard operating contract (`tach guard context --json`)",
+        json: include_str!("../schemas/guard-context.schema.json"),
+    },
+    Schema {
+        name: "guard-status",
+        title: "guard session status (`tach guard status --json`)",
+        json: include_str!("../schemas/guard-status.schema.json"),
+    },
+    Schema {
+        name: "guard-diff",
+        title: "guard scope-classified diff (`tach guard diff --json`)",
+        json: include_str!("../schemas/guard-diff.schema.json"),
+    },
+    Schema {
+        name: "guard-verify",
+        title: "guard verify result (`tach guard verify --json`)",
+        json: include_str!("../schemas/guard-verify.schema.json"),
+    },
+    Schema {
+        name: "guard-commit",
+        title: "guard commit/abort outcome (`tach guard commit --json`)",
+        json: include_str!("../schemas/guard-commit.schema.json"),
+    },
 ];
 
 /// Look up a schema by name.
@@ -91,6 +116,112 @@ mod tests {
     fn lookup_finds_published_schemas() {
         assert!(get("event").is_some());
         assert!(get("goal").is_some());
+        assert!(get("guard-context").is_some());
         assert!(get("nope").is_none());
+    }
+
+    /// The golden test the module doc promises: a representative output of each
+    /// guard packet must have exactly the property set its schema declares, and the
+    /// schema's `required` must be a subset of what the Rust type actually emits. No
+    /// JSON-Schema validator crate — this is field parity between the serializer
+    /// (the source of truth) and the published contract, which is the drift that
+    /// breaks integrators.
+    #[test]
+    fn guard_schemas_match_emitted_shapes() {
+        use crate::guard::{GuardContext, GuardDiff, GuardOutcome, GuardStatus};
+        use serde_json::json;
+        use std::collections::BTreeSet;
+
+        fn schema_keys(name: &str) -> (BTreeSet<String>, BTreeSet<String>) {
+            let s = get(name).unwrap_or_else(|| panic!("schema `{name}` not registered"));
+            let v: serde_json::Value = serde_json::from_str(s.json).unwrap();
+            let props = v
+                .get("properties")
+                .and_then(|p| p.as_object())
+                .unwrap_or_else(|| panic!("{name}: missing properties"));
+            let required = v
+                .get("required")
+                .and_then(|r| r.as_array())
+                .unwrap_or_else(|| panic!("{name}: missing required"));
+            (
+                props.keys().cloned().collect(),
+                required
+                    .iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect(),
+            )
+        }
+        fn assert_parity<T: serde::Serialize>(name: &str, v: &T) {
+            let emitted: BTreeSet<String> = serde_json::to_value(v)
+                .unwrap()
+                .as_object()
+                .unwrap_or_else(|| panic!("{name}: packet must serialize to an object"))
+                .keys()
+                .cloned()
+                .collect();
+            let (props, required) = schema_keys(name);
+            assert_eq!(
+                emitted, props,
+                "{name}: emitted keys must match schema properties exactly"
+            );
+            assert!(
+                required.is_subset(&emitted),
+                "{name}: schema `required` names a field the type does not emit"
+            );
+        }
+
+        assert_parity(
+            "guard-context",
+            &GuardContext {
+                goal: "FixFailingTests".into(),
+                run_id: "run_x".into(),
+                phase: "open".into(),
+                allowed_files: vec!["src/**".into()],
+                allowed_commands: vec!["cargo test".into()],
+                forbidden: json!({ "out_of_scope_writes": "rejected at the gate" }),
+                current_failure: None,
+                next_required_action: "edit files in scope, then run `tach guard verify`".into(),
+                done_condition: "`tach guard status --json` reports verified=true".into(),
+                verified: false,
+            },
+        );
+
+        let status = GuardStatus {
+            run_id: "run_x".into(),
+            goal: "FixFailingTests".into(),
+            phase: "verified".into(),
+            verified: true,
+            commands_required: 1,
+            commands_passed: 1,
+            out_of_scope: 0,
+            receipts: 1,
+            step: 1,
+        };
+        assert_parity("guard-status", &status);
+        // `verify` emits a status packet — same shape, its own published contract.
+        assert_parity("guard-verify", &status);
+
+        assert_parity(
+            "guard-diff",
+            &GuardDiff {
+                added: vec![],
+                modified: vec!["src/lib.rs".into()],
+                deleted: vec![],
+                in_scope: vec!["src/lib.rs".into()],
+                out_of_scope: vec![],
+                rejected: false,
+            },
+        );
+
+        assert_parity(
+            "guard-commit",
+            &GuardOutcome {
+                run_id: "run_x".into(),
+                ok: true,
+                reason: None,
+                status: "completed".into(),
+                phase: "committed".into(),
+            },
+        );
     }
 }

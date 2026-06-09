@@ -283,7 +283,7 @@ tach init --existing            # writes Tachfile, TACH_AGENT.md, .tachignore (d
 tach guard begin FixFailingTests
 #   … the agent reads `tach guard context --json` and edits files …
 tach guard verify               # runs the real test command; captures a receipt; sets verified
-tach guard commit               # finalizes only if verified — and only in Tach's ledger, never git
+tach guard finalize             # finalizes only if verified — and only in Tach's ledger, never git
 ```
 
 The `Tachfile` is the contract: a goal in the same grammar, scoped to a real tree.
@@ -463,7 +463,7 @@ The result is a single static binary. Put `target/release/tach` on your `PATH`.
 | `tach guard status` / `context` | Status line, or the agent's operating contract (`--json`) |
 | `tach guard diff` | Changed files since the baseline, classified by `fs.write` scope (`--json`) |
 | `tach guard verify` | Run the goal's required commands for real; set the `verified` bit (`--rerun`) |
-| `tach guard commit` / `abort` | Finalize verified changes into Tach's ledger, or cancel the session |
+| `tach guard finalize` / `abort` | Finalize verified changes into Tach's ledger (ledger-only, never git; `commit` is an alias), or cancel the session |
 | `tach check [file]` | Type- and effect-check; `--json` for the machine view |
 | `tach run [file]` | Run the project's `main` |
 | `tach test [filter]` | Run tests (blocked while the project has errors) |
@@ -488,7 +488,7 @@ The result is a single static binary. Put `target/release/tach` on your `PATH`.
 | `tach goal receipt <id> <rcpt>` | Show one receipt in full (`--json`) |
 | `tach doctor` | Hermetic health check of the toolchain + workspace |
 | `tach explain <code>` | Long-form explanation of a diagnostic code |
-| `tach schema [name]` | Print a versioned JSON schema for any machine output |
+| `tach schema [name]` | Print a versioned JSON schema for any machine output — `diagnostic`, `patch`, `event`, `goal`, `run`, `approval`, `receipt`, `bench`, `test`, and the guard packets `guard-context`, `guard-status`, `guard-diff`, `guard-verify`, `guard-commit` |
 
 ## A taste of the language
 

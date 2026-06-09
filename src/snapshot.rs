@@ -3,39 +3,164 @@
 //! A guard session needs a baseline of the working tree taken at `tach guard
 //! begin`, so that later it can tell exactly which files the external agent
 //! touched and check each against the goal's `fs.write` scope. We capture that
-//! baseline as a *manifest*: a map of repo-relative path -> content hash. Hashes,
-//! not contents, so the baseline of a 50k-file repo is still small — and the diff
-//! is a cheap map comparison.
+//! baseline as a *manifest*: a map of repo-relative path -> a small entry (a
+//! content hash plus the metadata a guardrail must not miss). Hashes, not
+//! contents, so the baseline of a 50k-file repo is still small — and the diff is a
+//! cheap map comparison.
 //!
-//! The walk deliberately mirrors `project::collect`'s exclusions (never descend
-//! into `.git`, `.tach`, `target`, `node_modules`, or any dotdir) so Tach's own
-//! `.tach/` state — which churns every `verify` — never shows up as a "change".
+//! The walk hard-excludes only `.git` and `.tach` — git's own store and Tach's own
+//! run state, which churns every `verify`. Everything else, *including* dotdirs
+//! like `.github/` and `.vscode/`, is walked and scope-checked: an agent that edits
+//! CI config or an editor hook must be visible to the gate. Heavy build/dependency
+//! roots (`target`, `node_modules`, …) are ignored by default but as ordinary,
+//! overridable globs — not because they start with a dot.
 
 use crate::patch::glob_match;
-use serde::Serialize;
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::Path;
 
-/// A snapshot of a tree: repo-relative (forward-slashed) path -> content hash.
-pub type Manifest = BTreeMap<String, String>;
+/// A snapshot of a tree: repo-relative (forward-slashed) path -> entry.
+pub type Manifest = BTreeMap<String, ManifestEntry>;
 
-/// The user-supplied ignore set, loaded from `.tachignore`. Built-in directory
-/// exclusions (dotdirs, `target`, `node_modules`) are handled by the walk itself
-/// and are not represented here.
-#[derive(Default, Debug)]
+/// What a tracked path *is*. A regular file vs. a symlink — the distinction matters
+/// to a guardrail because a file→symlink flip changes a path's meaning without
+/// changing its "contents". (A file→directory flip needs no variant: it surfaces as
+/// the file's key disappearing and child keys appearing, which the diff already
+/// classifies as a change.)
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EntryKind {
+    File,
+    Symlink,
+}
+
+/// One entry in a tree manifest. More than a content hash, because a guardrail has
+/// to notice changes that leave the bytes untouched: a file gaining the executable
+/// bit, a regular file becoming a symlink, or a symlink retargeted. Symlinks are
+/// recorded but never followed (they can cycle or point outside the repo), so a
+/// symlink carries the hash of its *target path*, not of any pointed-to bytes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ManifestEntry {
+    pub kind: EntryKind,
+    /// FNV hash of the file's bytes; `None` for a symlink.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_hash: Option<String>,
+    /// Whether any execute bit is set (unix `mode & 0o111`); always false off-unix.
+    #[serde(default)]
+    pub executable: bool,
+    /// FNV hash of the symlink's target path; `None` for a regular file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symlink_target_hash: Option<String>,
+}
+
+impl ManifestEntry {
+    /// A stable one-line signature folded into a tree digest. Every field that the
+    /// diff considers a change must appear here, so the verify idempotency key (and
+    /// thus reuse soundness and the stale-tree commit check) shifts when the exec
+    /// bit or a symlink target changes — not only when bytes change.
+    pub fn signature(&self) -> String {
+        let kind = match self.kind {
+            EntryKind::File => "f",
+            EntryKind::Symlink => "l",
+        };
+        format!(
+            "{}|{}|{}|{}",
+            kind,
+            self.content_hash.as_deref().unwrap_or("-"),
+            if self.executable { "x" } else { "-" },
+            self.symlink_target_hash.as_deref().unwrap_or("-"),
+        )
+    }
+}
+
+/// Custom `Deserialize` that also accepts a **legacy** bare-string value — the old
+/// manifest stored `path -> content_hash` directly — so a baseline written by an
+/// earlier Tach still loads as `{ File, Some(hash), .. }`. Same back-compat posture
+/// as the `#[serde(default)]` fields on `RunState`.
+impl<'de> Deserialize<'de> for ManifestEntry {
+    fn deserialize<D>(d: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Legacy(String),
+            Full {
+                kind: EntryKind,
+                #[serde(default)]
+                content_hash: Option<String>,
+                #[serde(default)]
+                executable: bool,
+                #[serde(default)]
+                symlink_target_hash: Option<String>,
+            },
+        }
+        Ok(match Raw::deserialize(d)? {
+            Raw::Legacy(hash) => ManifestEntry {
+                kind: EntryKind::File,
+                content_hash: Some(hash),
+                executable: false,
+                symlink_target_hash: None,
+            },
+            Raw::Full {
+                kind,
+                content_hash,
+                executable,
+                symlink_target_hash,
+            } => ManifestEntry {
+                kind,
+                content_hash,
+                executable,
+                symlink_target_hash,
+            },
+        })
+    }
+}
+
+/// Directory/dependency roots ignored by default — even with no `.tachignore` — so
+/// a snapshot never walks a giant `target/` or `node_modules/`. Unlike the hard
+/// excludes, these are ordinary globs the user can shadow or extend via
+/// `.tachignore`; they are not dotdir-based, so `.github`, `.vscode`, `.circleci`
+/// and friends are deliberately absent and therefore tracked.
+const DEFAULT_SOFT_IGNORES: &[&str] = &[
+    "target",
+    "node_modules",
+    "dist",
+    "build",
+    ".venv",
+    "__pycache__",
+];
+
+/// The ignore set governing a walk: the built-in soft defaults plus any
+/// `.tachignore` lines. The two hard excludes (`.git`, `.tach`) are enforced by the
+/// walk itself, not represented here, so nothing can override them.
+#[derive(Debug)]
 pub struct Ignore {
-    /// Each `.tachignore` line is expanded to two globs — the entry itself and
-    /// `entry/**` — so `target` ignores both the dir and everything beneath it.
+    /// Each pattern is expanded to two globs — the entry itself and `entry/**` — so
+    /// `target` ignores both the dir and everything beneath it.
     globs: Vec<String>,
 }
 
-impl Ignore {
-    /// Load `<repo>/.tachignore`, ignoring blank lines and `#` comments. A missing
-    /// file yields an empty ignore set.
-    pub fn load(repo: &Path) -> Self {
+impl Default for Ignore {
+    fn default() -> Self {
         let mut globs = Vec::new();
+        for name in DEFAULT_SOFT_IGNORES {
+            globs.push((*name).to_string());
+            globs.push(format!("{name}/**"));
+        }
+        Ignore { globs }
+    }
+}
+
+impl Ignore {
+    /// Load `<repo>/.tachignore` on top of the built-in soft defaults, ignoring
+    /// blank lines and `#` comments. A missing file yields just the defaults.
+    pub fn load(repo: &Path) -> Self {
+        let mut ig = Ignore::default();
         if let Ok(text) = fs::read_to_string(repo.join(".tachignore")) {
             for line in text.lines() {
                 let l = line.trim();
@@ -43,27 +168,29 @@ impl Ignore {
                     continue;
                 }
                 let base = l.trim_end_matches('/');
-                globs.push(base.to_string());
-                globs.push(format!("{base}/**"));
+                ig.globs.push(base.to_string());
+                ig.globs.push(format!("{base}/**"));
             }
         }
-        Ignore { globs }
+        ig
     }
 
-    /// Does any `.tachignore` pattern match this repo-relative path?
+    /// Does any ignore pattern (default or `.tachignore`) match this path?
     pub fn matches(&self, rel: &str) -> bool {
         self.globs.iter().any(|g| glob_match(g, rel))
     }
 }
 
-/// A directory name the walk never descends into, regardless of `.tachignore`.
-/// Dotdirs (`.git`, `.tach`, `.venv`, …) plus the usual heavy build/dep roots.
-fn is_builtin_ignored_dir(name: &str) -> bool {
-    name.starts_with('.') || matches!(name, "target" | "node_modules")
+/// Directory names the walk *never* descends into, regardless of `.tachignore`:
+/// git's own store and Tach's own run state. Everything else — including dotdirs
+/// like `.github` and `.vscode` — is walked, so edits there are seen and
+/// scope-checked.
+fn is_hard_excluded_dir(name: &str) -> bool {
+    matches!(name, ".git" | ".tach")
 }
 
-/// FNV-1a (64-bit) hex digest of a file's bytes — the same mixer the store uses
-/// for its deterministic ids, so the whole system speaks one hash.
+/// FNV-1a (64-bit) hex digest of a byte string — the same mixer the store uses for
+/// its deterministic ids, so the whole system speaks one hash.
 pub fn content_hash(bytes: &[u8]) -> String {
     let mut h: u64 = 0xcbf29ce484222325;
     for b in bytes {
@@ -71,6 +198,19 @@ pub fn content_hash(bytes: &[u8]) -> String {
         h = h.wrapping_mul(0x100000001b3);
     }
     format!("{h:016x}")
+}
+
+/// Whether `p` has any execute bit set. Unix-only signal; `false` elsewhere.
+#[cfg(unix)]
+fn is_executable(p: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    fs::metadata(p)
+        .map(|md| md.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+#[cfg(not(unix))]
+fn is_executable(_p: &Path) -> bool {
+    false
 }
 
 /// Walk the working tree under `repo` into a manifest, honoring the ignore set.
@@ -88,10 +228,6 @@ fn walk(base: &Path, dir: &Path, ignore: &Ignore, m: &mut Manifest) -> io::Resul
             Ok(ft) => ft,
             Err(_) => continue,
         };
-        // Never follow symlinks: they can form cycles and can point outside the repo.
-        if ft.is_symlink() {
-            continue;
-        }
         let p = e.path();
         let name = e.file_name().to_string_lossy().to_string();
         let rel = p
@@ -99,8 +235,26 @@ fn walk(base: &Path, dir: &Path, ignore: &Ignore, m: &mut Manifest) -> io::Resul
             .unwrap_or(&p)
             .to_string_lossy()
             .replace('\\', "/");
-        if ft.is_dir() {
-            if is_builtin_ignored_dir(&name) || ignore.matches(&rel) {
+        // Symlinks first: `file_type()` does not follow them, so a symlink to a dir
+        // still reports as a symlink here. Record the link, never traverse it.
+        if ft.is_symlink() {
+            if ignore.matches(&rel) {
+                continue;
+            }
+            let target = fs::read_link(&p)
+                .map(|t| t.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();
+            m.insert(
+                rel,
+                ManifestEntry {
+                    kind: EntryKind::Symlink,
+                    content_hash: None,
+                    executable: false,
+                    symlink_target_hash: Some(content_hash(target.as_bytes())),
+                },
+            );
+        } else if ft.is_dir() {
+            if is_hard_excluded_dir(&name) || ignore.matches(&rel) {
                 continue;
             }
             walk(base, &p, ignore, m)?;
@@ -109,7 +263,15 @@ fn walk(base: &Path, dir: &Path, ignore: &Ignore, m: &mut Manifest) -> io::Resul
                 continue;
             }
             let bytes = fs::read(&p)?;
-            m.insert(rel, content_hash(&bytes));
+            m.insert(
+                rel,
+                ManifestEntry {
+                    kind: EntryKind::File,
+                    content_hash: Some(content_hash(&bytes)),
+                    executable: is_executable(&p),
+                    symlink_target_hash: None,
+                },
+            );
         }
     }
     Ok(())
@@ -144,13 +306,15 @@ impl Diff {
     }
 }
 
-/// Diff a baseline against the current head manifest. Deterministic and sorted.
+/// Diff a baseline against the current head manifest. Deterministic and sorted. An
+/// entry counts as `modified` when *any* field differs — content, kind, exec bit,
+/// or symlink target — so a metadata-only change is not silently lost.
 pub fn diff(base: &Manifest, head: &Manifest) -> Diff {
     let mut d = Diff::default();
-    for (path, hash) in head {
+    for (path, entry) in head {
         match base.get(path) {
             None => d.added.push(path.clone()),
-            Some(h) if h != hash => d.modified.push(path.clone()),
+            Some(b) if b != entry => d.modified.push(path.clone()),
             _ => {}
         }
     }
@@ -201,17 +365,38 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_skips_builtin_dirs_and_tracks_files() {
+    fn snapshot_skips_hard_excludes_and_soft_defaults_but_tracks_files() {
         let d = TempDir::new("walk");
         d.write("src/lib.rs", "fn a() {}");
         d.write("README.md", "hi");
-        d.write("target/debug/junk", "x"); // must be skipped
-        d.write(".git/config", "x"); // must be skipped
-        d.write(".tach/goals/run/state.json", "x"); // must be skipped
+        d.write("target/debug/junk", "x"); // soft default → skipped
+        d.write("node_modules/pkg/index.js", "x"); // soft default → skipped
+        d.write(".git/config", "x"); // hard exclude → skipped
+        d.write(".tach/goals/run/state.json", "x"); // hard exclude → skipped
         let m = snapshot(d.path(), &Ignore::default()).unwrap();
         assert!(m.contains_key("src/lib.rs"));
         assert!(m.contains_key("README.md"));
         assert!(!m.keys().any(|k| k.starts_with("target/")));
+        assert!(!m.keys().any(|k| k.starts_with("node_modules/")));
+        assert!(!m.keys().any(|k| k.starts_with(".git/")));
+        assert!(!m.keys().any(|k| k.starts_with(".tach/")));
+    }
+
+    #[test]
+    fn dotdirs_other_than_git_and_tach_are_tracked() {
+        let d = TempDir::new("dotdirs");
+        d.write(".github/workflows/ci.yml", "on: push\n");
+        d.write(".vscode/settings.json", "{}");
+        d.write(".circleci/config.yml", "version: 2\n");
+        d.write(".git/config", "x"); // still invisible
+        d.write(".tach/x", "x"); // still invisible
+        let m = snapshot(d.path(), &Ignore::default()).unwrap();
+        assert!(
+            m.contains_key(".github/workflows/ci.yml"),
+            "CI config must be visible to the gate"
+        );
+        assert!(m.contains_key(".vscode/settings.json"));
+        assert!(m.contains_key(".circleci/config.yml"));
         assert!(!m.keys().any(|k| k.starts_with(".git/")));
         assert!(!m.keys().any(|k| k.starts_with(".tach/")));
     }
@@ -219,19 +404,19 @@ mod tests {
     #[test]
     fn tachignore_excludes_matches() {
         let d = TempDir::new("ignore");
-        d.write(".tachignore", "# comment\nbuild\n*.log\n");
+        d.write(".tachignore", "# comment\ncoverage\n*.log\n");
         d.write("src/lib.rs", "x");
-        d.write("build/out.o", "x");
+        d.write("coverage/report.html", "x");
         d.write("debug.log", "x");
         let ig = Ignore::load(d.path());
         let m = snapshot(d.path(), &ig).unwrap();
         assert!(m.contains_key("src/lib.rs"));
-        assert!(!m.contains_key("build/out.o"), "build/ dir ignored");
+        assert!(!m.contains_key("coverage/report.html"), "coverage/ ignored");
         assert!(!m.contains_key("debug.log"), "*.log ignored");
     }
 
     #[test]
-    fn diff_classifies_changes() {
+    fn diff_classifies_content_changes() {
         let d = TempDir::new("diff");
         d.write("a.txt", "1");
         d.write("b.txt", "1");
@@ -245,5 +430,81 @@ mod tests {
         assert_eq!(diff.modified, vec!["b.txt"]);
         assert_eq!(diff.deleted, vec!["a.txt"]);
         assert_eq!(diff.changed(), vec!["a.txt", "b.txt", "c.txt"]);
+    }
+
+    #[test]
+    fn legacy_bare_string_baseline_deserializes() {
+        // A baseline written by an earlier Tach: path -> content hash string.
+        let legacy = r#"{"src/lib.rs":"00000000deadbeef","README.md":"0000000012345678"}"#;
+        let m: Manifest = serde_json::from_str(legacy).unwrap();
+        let e = m.get("src/lib.rs").unwrap();
+        assert_eq!(e.kind, EntryKind::File);
+        assert_eq!(e.content_hash.as_deref(), Some("00000000deadbeef"));
+        assert!(!e.executable);
+        assert!(e.symlink_target_hash.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn detects_exec_bit_change() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = TempDir::new("exec");
+        d.write("run.sh", "echo hi\n");
+        let base = snapshot(d.path(), &Ignore::default()).unwrap();
+        assert!(!base["run.sh"].executable);
+        let p = d.path().join("run.sh");
+        let mut perm = fs::metadata(&p).unwrap().permissions();
+        perm.set_mode(0o755);
+        fs::set_permissions(&p, perm).unwrap();
+        let head = snapshot(d.path(), &Ignore::default()).unwrap();
+        assert!(head["run.sh"].executable);
+        let diff = diff(&base, &head);
+        assert_eq!(
+            diff.modified,
+            vec!["run.sh"],
+            "exec-bit flip must be a change"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn detects_symlink_and_target_change() {
+        use std::os::unix::fs::symlink;
+        let d = TempDir::new("symlink");
+        d.write("a.txt", "a");
+        d.write("b.txt", "b");
+        symlink("a.txt", d.path().join("link")).unwrap();
+        let base = snapshot(d.path(), &Ignore::default()).unwrap();
+        assert_eq!(base["link"].kind, EntryKind::Symlink);
+        assert!(base["link"].content_hash.is_none());
+        assert!(base["link"].symlink_target_hash.is_some());
+
+        // Retarget the symlink: bytes of nothing changed, but meaning did.
+        fs::remove_file(d.path().join("link")).unwrap();
+        symlink("b.txt", d.path().join("link")).unwrap();
+        let head = snapshot(d.path(), &Ignore::default()).unwrap();
+        let diff = diff(&base, &head);
+        assert_eq!(
+            diff.modified,
+            vec!["link"],
+            "retargeted symlink must be a change"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn detects_file_to_symlink_flip() {
+        use std::os::unix::fs::symlink;
+        let d = TempDir::new("flip");
+        d.write("x", "real contents");
+        d.write("other", "other");
+        let base = snapshot(d.path(), &Ignore::default()).unwrap();
+        assert_eq!(base["x"].kind, EntryKind::File);
+        // Replace the regular file with a symlink of the same name.
+        fs::remove_file(d.path().join("x")).unwrap();
+        symlink("other", d.path().join("x")).unwrap();
+        let head = snapshot(d.path(), &Ignore::default()).unwrap();
+        assert_eq!(head["x"].kind, EntryKind::Symlink);
+        assert_eq!(diff(&base, &head).modified, vec!["x"]);
     }
 }

@@ -953,7 +953,10 @@ fn cmd_guard(rest: &[String]) -> i32 {
         "context" => cmd_guard_context(&rest),
         "diff" => cmd_guard_diff(&rest),
         "verify" => cmd_guard_verify(&rest),
-        "commit" => cmd_guard_commit(&rest),
+        // `finalize` is the preferred spelling; `commit` is a back-compat alias.
+        // Both are ledger-only and never touch git — the rename exists only to stop
+        // the word "commit" reading as a git commit.
+        "finalize" | "commit" => cmd_guard_commit(&rest),
         "abort" => cmd_guard_abort(&rest),
         "" => {
             print_guard_help();
@@ -1085,13 +1088,57 @@ fn cmd_guard_diff(rest: &[String]) -> i32 {
 }
 
 fn cmd_guard_verify(rest: &[String]) -> i32 {
-    let p = parse(rest, &[]);
+    let p = parse(rest, &["--crash-after"]);
     let root = cwd();
     let id = match active_or_pos(&p, &root) {
         Ok(i) => i,
         Err(c) => return c,
     };
-    match guard::verify(&root, &id, p.has("--rerun")) {
+    let rerun = p.has("--rerun");
+
+    // Test/e2e crash hook: `--crash-after receipt:N` stops right after the Nth
+    // command receipt is durable but before `verified` is saved, so a resumed
+    // verify can be shown to reuse the receipt instead of re-running the command.
+    // Exits CRASH_EXIT (the goal-runtime convention) when the crash actually fires.
+    if let Some(n) = parse_guard_crash(&p) {
+        return match guard::verify_inner(
+            &root,
+            &id,
+            rerun,
+            Some(guard::GuardCrash::AfterReceipt(n)),
+        ) {
+            Ok(s) if !s.verified && s.out_of_scope == 0 && s.receipts >= n => {
+                println!(
+                    "\n  {} crashed after receipt {} (simulated). State is durable.",
+                    term::bold_yellow("✗"),
+                    n
+                );
+                println!(
+                    "  resume with  {}",
+                    term::bold(&format!("tach guard verify {}", id))
+                );
+                CRASH_EXIT
+            }
+            // Crash point never reached (e.g. the receipt was reused) — fall back to
+            // reporting the verify result normally.
+            Ok(s) => {
+                if p.has("--json") {
+                    print_json(&s);
+                }
+                if s.verified {
+                    0
+                } else {
+                    1
+                }
+            }
+            Err(e) => {
+                eprintln!("{} {}", term::bold_red("error:"), e);
+                1
+            }
+        };
+    }
+
+    match guard::verify(&root, &id, rerun) {
         Ok(s) => {
             if p.has("--json") {
                 print_json(&s);
@@ -1138,7 +1185,7 @@ fn cmd_guard_commit(rest: &[String]) -> i32 {
                 print_json(&out);
             } else if out.ok {
                 println!(
-                    "  {} committed — run {} is {} (git untouched)",
+                    "  {} finalized — run {} is {} (Tach ledger only; git untouched)",
                     term::green("✓"),
                     out.run_id,
                     out.status
@@ -1200,7 +1247,8 @@ fn print_guard_help() {
     println!("  context --json   the operating contract for the agent");
     println!("  diff [--json]    changed files, classified by scope");
     println!("  verify [--rerun] run required commands; set the verified bit");
-    println!("  commit           finalize verified changes into Tach's ledger");
+    println!("  finalize         finalize verified changes into Tach's ledger (never git)");
+    println!("  commit           alias for finalize (ledger-only, never git)");
     println!("  abort            cancel the session");
 }
 
@@ -1279,6 +1327,14 @@ fn parse_crash_after(p: &Parsed) -> Option<u64> {
     // Accept `--crash-after step:3` or `--crash-after 3`.
     let raw = p.get("--crash-after")?;
     let n = raw.strip_prefix("step:").unwrap_or(raw);
+    n.parse().ok()
+}
+
+/// The guard analog of `parse_crash_after`: `tach guard verify --crash-after
+/// receipt:N` (bare `N` also accepted) stops right after the Nth command receipt.
+fn parse_guard_crash(p: &Parsed) -> Option<usize> {
+    let raw = p.get("--crash-after")?;
+    let n = raw.strip_prefix("receipt:").unwrap_or(raw);
     n.parse().ok()
 }
 
@@ -2234,7 +2290,7 @@ fn print_help() {
     );
     cmd(
         "guard <sub>",
-        "coding-agent session: begin, status, context, diff, verify, commit, abort",
+        "coding-agent session: begin, status, context, diff, verify, finalize, abort",
     );
     cmd(
         "check [file]",

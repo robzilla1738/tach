@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tach.dev/schemas/guard-commit.schema.json",
+  "title": "Tach Guard Outcome",
+  "description": "The outcome of `tach guard commit` or `tach guard abort`. A commit finalizes a verified, unchanged-since-verify session into Tach's own ledger only — it does not create a git commit or touch git in any way. When `ok` is false, `reason` explains the refusal (not verified, tree changed since verify, or out-of-scope writes present) and the run is left resumable so the agent can fix and retry.",
+  "type": "object",
+  "required": ["run_id", "ok", "reason", "status", "phase"],
+  "additionalProperties": false,
+  "properties": {
+    "run_id": { "type": "string", "description": "The guard session id." },
+    "ok": { "type": "boolean", "description": "True when the operation finalized the session; false when it was refused." },
+    "reason": { "type": ["string", "null"], "description": "Why a commit was refused, or null on success." },
+    "status": { "type": "string", "description": "The run's status after the operation: completed, cancelled, or still running on a refusal." },
+    "phase": { "type": "string", "description": "Session phase after the operation: committed, aborted, or unchanged on a refusal." }
+  }
+}

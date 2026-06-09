@@ -1962,8 +1962,12 @@ mod tests {
         fn new(tag: &str) -> Self {
             static N: AtomicU64 = AtomicU64::new(0);
             let n = N.fetch_add(1, Ordering::Relaxed);
-            let dir =
-                std::env::temp_dir().join(format!("perdure_rt_{}_{}_{}", std::process::id(), tag, n));
+            let dir = std::env::temp_dir().join(format!(
+                "perdure_rt_{}_{}_{}",
+                std::process::id(),
+                tag,
+                n
+            ));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             TempRepo(dir)
@@ -3038,7 +3042,11 @@ mod tests {
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(entries, vec![".perdure".to_string()], "no stray files at root");
+        assert_eq!(
+            entries,
+            vec![".perdure".to_string()],
+            "no stray files at root"
+        );
     }
 
     // ----- user-authored (workspace) plan goals -----

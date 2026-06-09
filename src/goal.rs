@@ -224,7 +224,10 @@ mod tests {
     #[test]
     fn time_budget_parses_seconds_minutes_hours() {
         assert_eq!(spec_with_time(Some("45s")).time_budget_ms(), Some(45_000));
-        assert_eq!(spec_with_time(Some("20m")).time_budget_ms(), Some(1_200_000));
+        assert_eq!(
+            spec_with_time(Some("20m")).time_budget_ms(),
+            Some(1_200_000)
+        );
         assert_eq!(spec_with_time(Some("2h")).time_budget_ms(), Some(7_200_000));
         assert_eq!(spec_with_time(Some("0s")).time_budget_ms(), Some(0));
     }

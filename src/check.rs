@@ -247,7 +247,9 @@ fn check_plan_stmts(
         match s {
             PlanStmt::Let { name, value, .. } => {
                 match value {
-                    PlanValue::Call(c) => check_plan_call(c, granted, shell, known, bound, unit, diags),
+                    PlanValue::Call(c) => {
+                        check_plan_call(c, granted, shell, known, bound, unit, diags)
+                    }
                     PlanValue::Expr(e) => check_plan_expr(e, bound, unit, diags),
                 }
                 // The binding is visible only AFTER its right-hand side (a `let x = x`

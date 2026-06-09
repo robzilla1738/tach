@@ -1,0 +1,6 @@
+# Perdure sources and scripts are LF everywhere: the formatter and the
+# corpus fixed-point tests compare byte-for-byte, and a CRLF checkout on
+# Windows would make every .pdr file "unformatted".
+*.pdr text eol=lf
+*.sh text eol=lf
+Perdurefile text eol=lf

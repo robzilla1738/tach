@@ -199,9 +199,12 @@ fn required_str<'a>(input: &'a Value, field: &str) -> Result<&'a str, String> {
 }
 
 /// A plan-supplied cwd stays inside the repo: relative, no parent escapes.
+/// `has_root()` as well as `is_absolute()`: on Windows, `/etc` is rooted but
+/// not "absolute" (no drive letter), and a rooted path still escapes the repo
+/// when joined.
 fn check_cwd(cwd: &str) -> Result<(), String> {
     let p = Path::new(cwd);
-    if p.is_absolute() {
+    if p.is_absolute() || p.has_root() {
         return Err(format!("`cwd` must be repo-relative, got absolute `{cwd}`"));
     }
     if p.components()

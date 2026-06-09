@@ -1,10 +1,27 @@
 [package]
 name = "perdure"
-version = "0.1.0"
+version = "0.2.0-alpha.1"
 edition = "2021"
-description = "Perdure — a typed goal runtime for long-horizon agents. The fastest path from a failing goal to a verified result."
+rust-version = "1.82"
+description = "Durable, exactly-once execution for agent workflows: typed goals with enforced authority, receipts, approvals, crash-safe resume, and replay."
 license = "MIT"
 authors = ["Robert"]
+repository = "https://github.com/robzilla1738/perdure"
+homepage = "https://github.com/robzilla1738/perdure"
+readme = "README.md"
+keywords = ["agents", "durable-execution", "workflow", "runtime", "language"]
+categories = ["command-line-utilities", "development-tools"]
+# Keep the published crate slim: corpora, fixtures, e2e scripts, and editor
+# tooling matter to the repo, not to `cargo install perdure`.
+exclude = [
+    "corpus/",
+    "fixtures/",
+    "tests/",
+    "scripts/",
+    "docs/",
+    "editors/",
+    ".github/",
+]
 
 # The repo carries sample "existing" repos under fixtures/ (each with its own
 # Cargo.toml/package.json) used by the coding-harness e2e. Excluding them keeps

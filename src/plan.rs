@@ -1,7 +1,7 @@
-//! The Tach **plan language**: durable, re-executable agentic workflows.
+//! The Perdure **plan language**: durable, re-executable agentic workflows.
 //!
 //! A `goal` may carry a `plan { ... }` block — a small, dynamically-typed,
-//! JSON-valued workflow language layered on the ordinary Tach expression
+//! JSON-valued workflow language layered on the ordinary Perdure expression
 //! grammar. Where the linear action layer (`action.rs`) runs a fixed list of
 //! steps, a plan has real control flow:
 //!
@@ -262,7 +262,7 @@ pub fn builtin_plan_goal(name: &str) -> Option<(GoalSpec, PlanBlock)> {
         "RetryFlakyDeploy" => RETRY_FLAKY_DEPLOY,
         _ => return None,
     };
-    let (prog, diags) = Program::parse_sources(vec![SourceFile::new("builtin.tach", src)]);
+    let (prog, diags) = Program::parse_sources(vec![SourceFile::new("builtin.pdr", src)]);
     debug_assert!(
         diags.iter().all(|d| !d.is_error()),
         "built-in plan goal `{name}` must parse cleanly: {diags:?}"
@@ -272,7 +272,7 @@ pub fn builtin_plan_goal(name: &str) -> Option<(GoalSpec, PlanBlock)> {
     Some((GoalSpec::from_decl(decl), plan))
 }
 
-/// Every built-in plan goal, in stable order (for `tach goal`).
+/// Every built-in plan goal, in stable order (for `perdure goal`).
 pub fn builtin_plan_goal_names() -> &'static [&'static str] {
     &["ReconcileChargebacks", "RetryFlakyDeploy"]
 }
@@ -383,7 +383,7 @@ mod tests {
         // Parse a one-off expression by wrapping it in a tiny plan and pulling
         // the let value out — keeps the test honest about the real grammar.
         let src = format!("goal T {{ plan {{ let x = {src_expr} }} }}\n");
-        let (prog, diags) = Program::parse_sources(vec![SourceFile::new("t.tach", &src)]);
+        let (prog, diags) = Program::parse_sources(vec![SourceFile::new("t.pdr", &src)]);
         assert!(
             diags.iter().all(|d| !d.is_error()),
             "expr `{src_expr}` parse errors: {diags:?}"

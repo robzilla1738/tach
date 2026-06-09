@@ -1,6 +1,6 @@
-//! Tach — a typed goal runtime for long-horizon agents.
+//! Perdure — a typed goal runtime for long-horizon agents.
 //!
-//! Tach gives an agent's goals a typed, deterministic, auditable control plane:
+//! Perdure gives an agent's goals a typed, deterministic, auditable control plane:
 //! goal -> budget -> authority -> diagnostic -> typed patch -> verify -> checkpoint
 //! -> resume -> trace.
 //!

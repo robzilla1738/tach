@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://tach.dev/schemas/run.schema.json",
-  "title": "Tach Run State",
+  "$id": "https://perdure.dev/schemas/run.schema.json",
+  "title": "Perdure Run State",
   "description": "The mutable head of a goal run (state.json): the latest summary of status, progress, and agent-loop metrics. The immutable history lives in events.jsonl.",
   "type": "object",
   "required": ["run_id", "goal", "status", "step"],

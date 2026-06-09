@@ -8,7 +8,7 @@ use crate::token::{Tok, Token};
 ///
 /// The grammar is deliberately small and has one obvious way to write things —
 /// that is a feature, not a limitation. Fewer ambiguities means an agent editing
-/// Tach has fewer ways to produce something that parses but means the wrong thing.
+/// Perdure has fewer ways to produce something that parses but means the wrong thing.
 pub struct Parser {
     file: String,
     toks: Vec<Token>,
@@ -206,7 +206,7 @@ impl Parser {
 
     // ----- goals -----
 
-    /// Parse a dotted name like `db.read`, `fs.write`, or `tach.check` into a
+    /// Parse a dotted name like `db.read`, `fs.write`, or `perdure.check` into a
     /// single string. Goals describe authority over namespaced tools and effects,
     /// so a dotted path is the natural identifier there.
     fn parse_dotted_name(&mut self) -> (String, Span) {
@@ -378,7 +378,7 @@ impl Parser {
                 "fs.write" => a.fs_write.extend(self.parse_glob_values()),
                 "shell.run" => a.shell.extend(self.parse_glob_values()),
                 _ => {
-                    // A bare dotted name is a tool grant, e.g. `tach.check`.
+                    // A bare dotted name is a tool grant, e.g. `perdure.check`.
                     a.tools.push(head);
                 }
             }
@@ -1343,7 +1343,7 @@ fn describe(p: Parity) -> String {
 
     #[test]
     fn parses_sum_type_and_match() {
-        let (module, diags) = parse("sum.tach", SUM);
+        let (module, diags) = parse("sum.pdr", SUM);
         let errs: Vec<_> = diags.iter().filter(|d| d.is_error()).collect();
         assert!(errs.is_empty(), "unexpected parse errors: {:?}", errs);
 
@@ -1380,7 +1380,7 @@ fn describe(p: Parity) -> String {
 
     #[test]
     fn parses_sample_cleanly() {
-        let (module, diags) = parse("sample.tach", SAMPLE);
+        let (module, diags) = parse("sample.pdr", SAMPLE);
         let errs: Vec<_> = diags.iter().filter(|d| d.is_error()).collect();
         assert!(errs.is_empty(), "unexpected parse errors: {:?}", errs);
         assert_eq!(module.items.len(), 4);
@@ -1412,7 +1412,7 @@ fn describe(p: Parity) -> String {
     fs.read "."
     fs.write ["src/**", "tests/**"]
     shell.run ["cargo test", "bun test"]
-    tach.check
+    perdure.check
   }
   require {
     tests.pass
@@ -1420,7 +1420,7 @@ fn describe(p: Parity) -> String {
   }
 }
 "#;
-        let (module, diags) = parse("goal.tach", src);
+        let (module, diags) = parse("goal.pdr", src);
         let errs: Vec<_> = diags.iter().filter(|d| d.is_error()).collect();
         assert!(errs.is_empty(), "unexpected parse errors: {:?}", errs);
         let g = module
@@ -1442,7 +1442,7 @@ fn describe(p: Parity) -> String {
         assert_eq!(g.allow.fs_read, vec!["."]);
         assert_eq!(g.allow.fs_write, vec!["src/**", "tests/**"]);
         assert_eq!(g.allow.shell, vec!["cargo test", "bun test"]);
-        assert_eq!(g.allow.tools, vec!["tach.check"]);
+        assert_eq!(g.allow.tools, vec!["perdure.check"]);
         assert_eq!(g.require.conditions.len(), 2);
         assert_eq!(g.require.conditions[0].name, "tests.pass");
         assert!(g.plan.is_none(), "a repair goal has no plan block");
@@ -1464,7 +1464,7 @@ fn describe(p: Parity) -> String {
   }
 }
 "#;
-        let (module, diags) = parse("Tachfile", src);
+        let (module, diags) = parse("Perdurefile", src);
         let errs: Vec<_> = diags.iter().filter(|d| d.is_error()).collect();
         assert!(errs.is_empty(), "unexpected parse errors: {:?}", errs);
         let g = module
@@ -1520,7 +1520,7 @@ fn describe(p: Parity) -> String {
   }
 }
 "#;
-        let (module, diags) = parse("plan.tach", src);
+        let (module, diags) = parse("plan.pdr", src);
         let errs: Vec<_> = diags.iter().filter(|d| d.is_error()).collect();
         assert!(errs.is_empty(), "unexpected parse errors: {:?}", errs);
         let g = module
@@ -1602,7 +1602,7 @@ fn describe(p: Parity) -> String {
   }
 }
 "#;
-        let (module, diags) = parse("forgiving.tach", src);
+        let (module, diags) = parse("forgiving.pdr", src);
         let errs: Vec<_> = diags.iter().filter(|d| d.is_error()).collect();
         assert!(errs.is_empty(), "unexpected parse errors: {:?}", errs);
         let g = module

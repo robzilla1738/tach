@@ -1,6 +1,6 @@
 # Architecture
 
-Tach's toolchain is one Rust crate (lib + `tach` binary) with sharply separated modules.
+Perdure's toolchain is one Rust crate (lib + `perdure` binary) with sharply separated modules.
 The throughline of the design: **a span is both "where the error is" and "where to edit."**
 Keeping a single byte-offset coordinate space across diagnostics and patches is what makes
 machine repair clean.
@@ -49,13 +49,13 @@ byte-for-byte.
 | `store` | the durable goal store: `goal.json`, `state.json`, `events.jsonl`, `checkpoints/`, `approvals/`, `receipts/` (each receipt self-describing — run/step/effect/input-hash/approval/recording-event), the deterministic source `fingerprint`, canonical idempotency/approval ids, **atomic + durable writes** (temp-file → `fsync` → rename → dir-`fsync`), a per-run advisory `RunLock`, and unique run-id allocation |
 | `runtime` | the durable executor — `step_once`/`drive` (the repair loop), the action layer's `drive_actions` (a fixed plan with approval gates and receipts), and the plan language's `drive_plan` (durable re-execution of a `plan` block); `resolve_plan` re-parses a user goal's frozen source snapshot on resume (catalog for built-ins); `resume_run`/`replay_run` dispatch on `GoalRecord.kind` |
 | `action` | the linear action layer: the `ActionPlan` model, the offline deterministic **fake tools** (`invoke_fake_tool`), and the built-in goal catalog (`ResolveDuplicateCharge`, `ShipHotfixPR`) |
-| `plan` | the **plan language**: the pure expression evaluator (AST `Expr` → JSON value) and the built-in plan-goal catalog (`ReconcileChargebacks`, `RetryFlakyDeploy`); user-authored plan goals run the same interpreter from a workspace `plan` block. The durable interpreter and `check::check_plan_goal` (the `tach goal check` linter) live in `runtime`/`check` |
+| `plan` | the **plan language**: the pure expression evaluator (AST `Expr` → JSON value) and the built-in plan-goal catalog (`ReconcileChargebacks`, `RetryFlakyDeploy`); user-authored plan goals run the same interpreter from a workspace `plan` block. The durable interpreter and `check::check_plan_goal` (the `perdure goal check` linter) live in `runtime`/`check` |
 | `fmt` | the one canonical formatter — a precedence-aware, idempotent AST pretty-printer (goals included) |
-| `schema` | versioned JSON Schemas for every machine output, embedded and served by `tach schema` (the goal-runtime packets **and** the guard packets `guard-context`/`status`/`diff`/`verify`/`commit`/`audit`) |
-| `trace` | persist/load `fix`/`race` runs to `.tach/trace.json` (the per-goal history lives in the store) |
-| `adopt` | `tach init --existing`: adopt an existing repo — detect its test command (cargo / npm / bun / pnpm / yarn / go / pytest), write `Tachfile`, `TACH_AGENT.md`, `.tachignore`, and leave the source (and any existing `AGENTS.md`) untouched |
-| `snapshot` | filesystem baselines and the scope gate: a **SHA-256**-content-hashed `Manifest` of the working tree (kind, content hash, exec bit, symlink target), the hard-exclude (`.git`/`.tach`) and soft-ignore (`target/`, `node_modules/`) rules with `.tachignore`/`.gitignore` never self-ignored, the begin-time-frozen ignore set, and the `diff` that classifies each change as in- or out-of-scope against the goal's `fs.write` globs |
-| `shell` | the **one** place Tach spawns a real process: tokenize-not-shell argv, fixed cwd, a scrubbed env allowlist, a bounded timeout that kills the whole process group, and stdout/stderr drained to artifact files on their own threads. Knows nothing about the store — it returns mechanics the caller turns into a receipt |
+| `schema` | versioned JSON Schemas for every machine output, embedded and served by `perdure schema` (the goal-runtime packets **and** the guard packets `guard-context`/`status`/`diff`/`verify`/`commit`/`audit`) |
+| `trace` | persist/load `fix`/`race` runs to `.perdure/trace.json` (the per-goal history lives in the store) |
+| `adopt` | `perdure init --existing`: adopt an existing repo — detect its test command (cargo / npm / bun / pnpm / yarn / go / pytest), write `Perdurefile`, `PERDURE_AGENT.md`, `.perdureignore`, and leave the source (and any existing `AGENTS.md`) untouched |
+| `snapshot` | filesystem baselines and the scope gate: a **SHA-256**-content-hashed `Manifest` of the working tree (kind, content hash, exec bit, symlink target), the hard-exclude (`.git`/`.perdure`) and soft-ignore (`target/`, `node_modules/`) rules with `.perdureignore`/`.gitignore` never self-ignored, the begin-time-frozen ignore set, and the `diff` that classifies each change as in- or out-of-scope against the goal's `fs.write` globs |
+| `shell` | the **one** place Perdure spawns a real process: tokenize-not-shell argv, fixed cwd, a scrubbed env allowlist, a bounded timeout that kills the whole process group, and stdout/stderr drained to artifact files on their own threads. Knows nothing about the store — it returns mechanics the caller turns into a receipt |
 | `guard` | the coding-agent session state machine: `begin`/`status`/`context`/`diff`/`verify`/`finalize`(`commit`)/`abort`/`audit` over a real repo, with crash-injection points for the e2e — receipts keyed by command + tree digest, so a crashed-then-resumed `verify` reuses the proof and the command runs exactly once; `audit` re-derives ledger integrity (chain + receipts + verified bit) for an operator |
 | `render` / `term` | pretty, colored human output (JSON is the machine path) |
 | `project` / `cli` | file discovery, scaffolding, suite loading, the command dispatcher |
@@ -160,12 +160,12 @@ Three properties carry the design:
 
 The working tree is never half-edited: the runtime operates on an in-memory `Workspace` and
 only writes verified files back when a run reaches `completed`. A crash leaves the source
-exactly as it was; the durable state lives entirely under `.tach/goals/<run_id>/`.
+exactly as it was; the durable state lives entirely under `.perdure/goals/<run_id>/`.
 
 ### The store layout
 
 ```
-.tach/goals/<run_id>/
+.perdure/goals/<run_id>/
   goal.json               the resolved GoalSpec + the base source snapshot
   state.json              the mutable RunState head (status, step, metrics)
   events.jsonl            append-only, hash-chained history (one tach.event.v2 per line)
@@ -192,8 +192,8 @@ is harmless.
 The event log is a **hash chain**: each event carries `prev_hash` (the previous event's hash) and
 `entry_hash` (SHA-256 over its own canonical content). Editing, inserting, removing, or reordering
 any event breaks every link after it, so the "append-only history" is *tamper-evident*, not merely
-append-only by convention. `event::verify_chain` (surfaced as `tach guard audit`) re-derives the
-chain; an agent with `.tach/` write access can still corrupt its ledger, but cannot forge a valid
+append-only by convention. `event::verify_chain` (surfaced as `perdure guard audit`) re-derives the
+chain; an agent with `.perdure/` write access can still corrupt its ledger, but cannot forge a valid
 one without inverting SHA-256. A per-run `lock` (an `flock` advisory lock on unix, auto-released on
 process exit) keeps two concurrent invocations from driving the same run at once.
 
@@ -203,7 +203,7 @@ A *business* goal is the same durable spine — run ids, the append-only log, `s
 but its unit of work is not "verify a typed patch", it is "invoke a tool and write a receipt".
 It runs a fixed `ActionPlan` (Rust data, from a built-in catalog; the goal's authority/budget
 live in a real `goal` declaration), where steps may pause for human approval and effectful
-steps must produce a receipt. `tach goal run ResolveDuplicateCharge` is the killer demo: look
+steps must produce a receipt. `perdure goal run ResolveDuplicateCharge` is the killer demo: look
 up a duplicate charge, refund it **behind an approval gate**, notify the customer, close the
 ticket — with *exactly one* refund, even across a crash.
 
@@ -250,13 +250,13 @@ receipt set reproduce. (It deliberately does **not** compare event sequences: a 
 resumed run has a longer log than a straight one, yet produces identical effects.)
 
 No ambient authority, and the working tree is never touched: an action goal proves its work
-entirely through receipts under `.tach/goals/<run_id>/`.
+entirely through receipts under `.perdure/goals/<run_id>/`.
 
 ## The plan language (`plan` + `runtime::drive_plan`)
 
 The linear `ActionPlan` is a straight list of steps. The **plan language** generalizes it to a
 real workflow: a `plan { ... }` block in goal source with `let` bindings, tool `call`s, `approve`
-gates, `if`/`else`, and **`for`/`while` loops**. Expressions reuse the ordinary Tach grammar
+gates, `if`/`else`, and **`for`/`while` loops**. Expressions reuse the ordinary Perdure grammar
 (field access, arithmetic, `&&`/`||`/`!`, comparisons); the interpreter evaluates them in
 JSON-value space, since that is what tools consume and receipts store. Two goals ship built-in:
 `ReconcileChargebacks` (a `for` loop over a tool's output with a per-duplicate refund gate) and
@@ -317,7 +317,7 @@ authoring workspace into `GoalRecord.base_files` (the same map repair goals snap
 Re-parsing the same source with the same binary is deterministic, so the walk-order ordinals and
 idempotency keys re-derive identically and exactly-once still holds; and because the live file is
 never read, editing it after a run starts cannot change a run already in flight. The plan checker
-(`check::check_plan_goal`, surfaced as `tach goal check`) validates a user plan — ungranted/unknown
+(`check::check_plan_goal`, surfaced as `perdure goal check`) validates a user plan — ungranted/unknown
 tools, unbound variables, unevaluable expressions, progress-free loops — before any of this runs.
 
 **Audit-grade receipts.** Beyond the exactly-once core (`idempotency_key` + `output`), each receipt
@@ -329,13 +329,13 @@ reproduction.
 
 ## The coding harness (`adopt` + `guard` + `snapshot` + `shell`)
 
-Everything above operates on Tach's own language in an in-memory `Workspace`. The **coding
+Everything above operates on Perdure's own language in an in-memory `Workspace`. The **coding
 harness** turns the same spine — authority scopes, durable receipts, crash/resume, replay —
 outward, onto an *existing* Rust / JS / Go / Python repo edited by an external agent (Claude
-Code, Codex, Cursor). Tach does not do the reasoning; it is the guardrail and the ledger.
+Code, Codex, Cursor). Perdure does not do the reasoning; it is the guardrail and the ledger.
 
-`tach init --existing` (`adopt`) detects the repo's test command and writes a `Tachfile` (a
-`goal` in the ordinary grammar, but scoped to a real tree), `TACH_AGENT.md`, and `.tachignore`.
+`perdure init --existing` (`adopt`) detects the repo's test command and writes a `Perdurefile` (a
+`goal` in the ordinary grammar, but scoped to a real tree), `PERDURE_AGENT.md`, and `.perdureignore`.
 A session is then a small state machine over the working tree:
 
 ```
@@ -343,7 +343,7 @@ guard begin <Goal>   snapshot the tree into a baseline Manifest; open run_<id>; 
 guard context --json the agent's operating contract: allowed files, allowed commands, done bit
 guard diff   --json  snapshot now vs. baseline; classify each change in-/out-of-scope
 guard verify         run each required command for real; capture a receipt; set the verified bit
-guard finalize       finalize ONLY if verified — into Tach's ledger, never git (commit is an alias)
+guard finalize       finalize ONLY if verified — into Perdure's ledger, never git (commit is an alias)
 guard abort          cancel the session
 ```
 
@@ -352,12 +352,12 @@ Four properties carry it, each a re-use of an existing mechanism rather than new
 - **The scope gate is the authority model, on a real filesystem.** `snapshot::diff` compares
   the live tree to the baseline `Manifest` and classifies every change against the goal's
   `fs.write` globs — the same `allowed_writes` authority the goal runtime enforces on typed
-  patches. Without a sandbox Tach can't *prevent* an out-of-scope write, so this is an honest
+  patches. Without a sandbox Perdure can't *prevent* an out-of-scope write, so this is an honest
   **detect-and-reject** gate: the violation is recorded in `events.jsonl` and `verify`/`finalize`
   refuse. The manifest hashes content (**SHA-256**, so a change can't be crafted to collide with
   the baseline), exec bit, and symlink target, and *tracks* dotdirs like `.github/` (only
-  `.git`/`.tach` are hard-excluded), so a CI-config edit can't slip the gate. The ignore set is
-  **frozen at `begin`** (stored as `baseline-ignore.json`) and `.tachignore`/`.gitignore` are
+  `.git`/`.perdure` are hard-excluded), so a CI-config edit can't slip the gate. The ignore set is
+  **frozen at `begin`** (stored as `baseline-ignore.json`) and `.perdureignore`/`.gitignore` are
   never self-ignored, so an agent can't edit them mid-session to shrink the gate's view; `guard
   diff` surfaces the remaining blind spots (build/dependency roots) explicitly. A file the
   *authorized command itself* generates is attributed tool-generated (verify's pre-command gate
@@ -377,17 +377,17 @@ Four properties carry it, each a re-use of an existing mechanism rather than new
   digest of the tree it ran against**, so a crashed-then-resumed `verify` over an unchanged
   tree finds the receipt and reuses the verdict instead of re-running, while an edited tree
   correctly re-runs. Receipts are `fsync`'d, so reuse survives a power loss, not just a clean
-  exit. `tach goal replay <id>` re-derives the verdict from the recorded receipts; `--rerun`
-  actually re-executes and compares. `finalize` writes only under `.tach/goals/<run_id>/` — the
+  exit. `perdure goal replay <id>` re-derives the verdict from the recorded receipts; `--rerun`
+  actually re-executes and compares. `finalize` writes only under `.perdure/goals/<run_id>/` — the
   git working tree is never touched.
 
-- **Tamper-evident, for an operator outside the agent.** The whole ledger lives in `.tach/`,
-  which the agent can write — so Tach cannot *prevent* forgery, only make it *detectable*. The
+- **Tamper-evident, for an operator outside the agent.** The whole ledger lives in `.perdure/`,
+  which the agent can write — so Perdure cannot *prevent* forgery, only make it *detectable*. The
   event log is a SHA-256 hash chain; receipts carry an `input_hash` and are anchored to a
   `receipt.created` event; the `verified` bit is checkable against the receipts that support it.
-  `tach guard audit` re-derives all three and exits non-zero on any break — the trust boundary is
+  `perdure guard audit` re-derives all three and exits non-zero on any break — the trust boundary is
   a human or CI running it from outside the agent. **True prevention needs an out-of-process
-  authority** holding the ledger beyond the agent's reach; that is the roadmap's `tach serve-mcp`,
+  authority** holding the ledger beyond the agent's reach; that is the roadmap's `perdure serve-mcp`,
   and it is the one guarantee this in-repo design deliberately cannot make.
 
 ## Why an interpreter (for now)

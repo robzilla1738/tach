@@ -2,7 +2,7 @@ use crate::diagnostics::Diagnostic;
 use crate::span::Span;
 use crate::token::{Tok, Token};
 
-/// Tokenize Tach source.
+/// Tokenize Perdure source.
 ///
 /// Newlines are significant statement separators, but are suppressed while
 /// nested inside `(` or `[` so multi-line call arguments and `effects [...]`
@@ -119,7 +119,7 @@ pub fn lex(file: &str, src: &str) -> (Vec<Token>, Vec<Diagnostic>) {
                 let text: String = chars[i..j].iter().map(|(_, ch)| *ch).collect();
                 let span = Span::new(start, end_off(j));
                 // A literal that overflows its type must be an *error*, never a silent
-                // `0`: an agent editing Tach would have no idea its `1_0000000000…`
+                // `0`: an agent editing Perdure would have no idea its `1_0000000000…`
                 // became zero, and a miscompiled constant is exactly the kind of quiet
                 // wrong-answer this language exists to make impossible.
                 let kind = if is_float {
@@ -271,14 +271,14 @@ mod tests {
     #[test]
     fn oversized_int_literal_is_an_error_not_a_silent_zero() {
         // The headline correctness fix: an out-of-range literal must be flagged, never
-        // silently miscompiled to 0 (which an agent editing Tach would never notice).
-        let (_t, diags) = lex("t.tach", "fn f() { return 99999999999999999999999999 }");
+        // silently miscompiled to 0 (which an agent editing Perdure would never notice).
+        let (_t, diags) = lex("t.pdr", "fn f() { return 99999999999999999999999999 }");
         assert!(
             diags.iter().any(|d| d.code == "E0002"),
             "overflowing int literal must emit E0002, got {diags:?}"
         );
         // A valid (in-range) i64 still lexes to its exact value, no false positive.
-        let (toks, diags) = lex("t.tach", "fn f() { return 9000000000000000000 }");
+        let (toks, diags) = lex("t.pdr", "fn f() { return 9000000000000000000 }");
         assert!(diags.iter().all(|d| d.code != "E0002"));
         assert!(toks
             .iter()
@@ -290,7 +290,7 @@ mod tests {
         // The unclosed string must stop at the newline, so `let y = 5` below still
         // lexes (an Int 5 appears) instead of being eaten as string bytes.
         let src = "fn f() {\n  let s = \"oops\n  let y = 5\n}\n";
-        let (toks, diags) = lex("t.tach", src);
+        let (toks, diags) = lex("t.pdr", src);
         assert!(
             diags.iter().any(|d| d.code == "E0001"),
             "unterminated string must be flagged"

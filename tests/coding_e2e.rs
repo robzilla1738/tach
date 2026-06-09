@@ -1,5 +1,5 @@
 //! End-to-end test for the coding-agent harness, driven through the real CLI
-//! (`tach::cli::run`) against a throwaway copy of `fixtures/existing-rust`.
+//! (`perdure::cli::run`) against a throwaway copy of `fixtures/existing-rust`.
 //!
 //! It proves the P0 contract: `init --existing` adopts a real repo without
 //! scaffolding source; a guard session snapshots the tree, runs the project's
@@ -14,8 +14,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use tach::event::{self, kind};
-use tach::{adopt, cli, guard, runtime, store};
+use perdure::event::{self, kind};
+use perdure::{adopt, cli, guard, runtime, store};
 
 fn fixture_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/existing-rust")
@@ -49,10 +49,10 @@ fn write(p: &Path, rel: &str, text: &str) {
     fs::write(full, text).unwrap();
 }
 
-/// The execution Tachfile: identical in shape to what `init` generates, but with
+/// The execution Perdurefile: identical in shape to what `init` generates, but with
 /// the cheap `sh check.sh` command so the e2e exercises real process execution
 /// without a Rust toolchain.
-fn execution_tachfile() -> String {
+fn execution_perdurefile() -> String {
     adopt::coding_goal_source(
         "FixFailingTests",
         "sh check.sh",
@@ -62,7 +62,7 @@ fn execution_tachfile() -> String {
 
 #[test]
 fn coding_harness_end_to_end() {
-    let tmp = std::env::temp_dir().join(format!("tach_e2e_{}", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("perdure_e2e_{}", std::process::id()));
     let _ = fs::remove_dir_all(&tmp);
     copy_dir(&fixture_root(), &tmp);
 
@@ -84,11 +84,11 @@ fn body(tmp: &Path) {
     // (1 — init --existing) Adopt the repo. A pre-existing AGENTS.md is sacred.
     write(tmp, "AGENTS.md", "user owned — do not touch");
     assert_eq!(run(&["init", "--existing"]), 0);
-    assert!(tmp.join("Tachfile").exists());
-    assert!(tmp.join("TACH_AGENT.md").exists());
-    assert!(tmp.join(".tachignore").exists());
+    assert!(tmp.join("Perdurefile").exists());
+    assert!(tmp.join("PERDURE_AGENT.md").exists());
+    assert!(tmp.join(".perdureignore").exists());
     assert!(
-        !tmp.join("src/main.tach").exists(),
+        !tmp.join("src/main.pdr").exists(),
         "no toy source scaffolded"
     );
     assert_eq!(
@@ -96,7 +96,7 @@ fn body(tmp: &Path) {
         "user owned — do not touch",
         "AGENTS.md must never be clobbered"
     );
-    let generated = read(tmp, "Tachfile");
+    let generated = read(tmp, "Perdurefile");
     assert!(
         generated.contains("command(\"cargo test\").passes"),
         "generated goal must require the detected command: {generated}"
@@ -104,7 +104,7 @@ fn body(tmp: &Path) {
     assert!(generated.contains("shell.run"));
 
     // Swap in the cheap execution command for the rest of the flow.
-    write(tmp, "Tachfile", &execution_tachfile());
+    write(tmp, "Perdurefile", &execution_perdurefile());
 
     // (3 — begin) Open a guard session over the working tree.
     assert_eq!(run(&["guard", "begin", "FixFailingTests"]), 0);

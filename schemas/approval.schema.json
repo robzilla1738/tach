@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://tach.dev/schemas/approval.schema.json",
-  "title": "Tach Approval",
-  "description": "A human approval gate on an effectful action in an action run (approvals/<id>.json). The driver writes it pending when it proposes the action; `tach goal approve`/`deny` flips it to a terminal status. The approval file is the durable truth for whether a gate is resolved.",
+  "$id": "https://perdure.dev/schemas/approval.schema.json",
+  "title": "Perdure Approval",
+  "description": "A human approval gate on an effectful action in an action run (approvals/<id>.json). The driver writes it pending when it proposes the action; `perdure goal approve`/`deny` flips it to a terminal status. The approval file is the durable truth for whether a gate is resolved.",
   "type": "object",
   "required": ["id", "action_id", "tool", "summary", "status"],
   "additionalProperties": false,

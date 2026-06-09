@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://tach.dev/schemas/bench.schema.json",
-  "title": "Tach Suite Bench Output",
-  "description": "The JSON emitted by `tach bench --suite <dir> --json`: per-case repair outcomes plus aggregate agent-loop metrics (time-to-green, patches-to-green, tests-run, regressions).",
+  "$id": "https://perdure.dev/schemas/bench.schema.json",
+  "title": "Perdure Suite Bench Output",
+  "description": "The JSON emitted by `perdure bench --suite <dir> --json`: per-case repair outcomes plus aggregate agent-loop metrics (time-to-green, patches-to-green, tests-run, regressions).",
   "type": "object",
   "required": ["cases", "totals"],
   "additionalProperties": false,

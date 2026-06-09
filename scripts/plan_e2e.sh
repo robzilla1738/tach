@@ -12,7 +12,7 @@ export NO_COLOR=1
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cargo build --release --manifest-path "$ROOT/Cargo.toml"
-BIN="$ROOT/target/release/tach"
+BIN="$ROOT/target/release/perdure"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -28,7 +28,7 @@ refund_receipts() {
   "$BIN" goal receipts "$1" | grep -c 'fake.stripe.refund' || true
 }
 
-echo "## tach goal run ReconcileChargebacks  (expect a pause at the first duplicate's gate)"
+echo "## perdure goal run ReconcileChargebacks  (expect a pause at the first duplicate's gate)"
 "$BIN" goal run ReconcileChargebacks >/dev/null
 RUN_ID="$("$BIN" goal list | awk '/run_/ {print $1; exit}')"
 echo "## run id: $RUN_ID"
@@ -56,7 +56,7 @@ if [ "$(refund_receipts "$RUN_ID")" -ne 1 ]; then
 fi
 echo "   ok — crashed mid-loop with the first refund durable"
 
-echo "## tach goal resume $RUN_ID  (expect a pause at the SECOND duplicate's gate — refund #1 is NOT repeated)"
+echo "## perdure goal resume $RUN_ID  (expect a pause at the SECOND duplicate's gate — refund #1 is NOT repeated)"
 "$BIN" goal resume "$RUN_ID" >/dev/null
 if [ "$(status_of "$RUN_ID")" != "awaiting_approval" ]; then
   echo "FAIL: expected awaiting_approval at the second gate, got $(status_of "$RUN_ID")"
@@ -99,7 +99,7 @@ if [ "$TOTAL" -ne 6 ]; then
 fi
 echo "   ok — two durable refund receipts (six total)"
 
-echo "## tach goal replay $RUN_ID  (expect exact reproduction)"
+echo "## perdure goal replay $RUN_ID  (expect exact reproduction)"
 "$BIN" goal replay "$RUN_ID"
 
 echo

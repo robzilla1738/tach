@@ -1,8 +1,8 @@
 [package]
-name = "tach"
+name = "perdure"
 version = "0.1.0"
 edition = "2021"
-description = "Tach — a typed goal runtime for long-horizon agents. The fastest path from a failing goal to a verified result."
+description = "Perdure — a typed goal runtime for long-horizon agents. The fastest path from a failing goal to a verified result."
 license = "MIT"
 authors = ["Robert"]
 
@@ -13,11 +13,11 @@ authors = ["Robert"]
 exclude = ["fixtures"]
 
 [[bin]]
-name = "tach"
+name = "perdure"
 path = "src/main.rs"
 
 [lib]
-name = "tach"
+name = "perdure"
 path = "src/lib.rs"
 
 [dependencies]

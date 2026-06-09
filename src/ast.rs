@@ -22,7 +22,7 @@ pub enum Item {
 /// held to. A goal is declarative — it names the budget it may spend, the
 /// authority it is allowed to exercise (effects, file scopes, tools), and the
 /// conditions that must hold for it to be considered a success. The durable
-/// runtime (`tach goal run`) executes the repair loop under exactly these
+/// runtime (`perdure goal run`) executes the repair loop under exactly these
 /// constraints, checkpointing as it goes so a crashed run can resume without
 /// repeating work.
 #[derive(Clone, Debug)]
@@ -68,7 +68,7 @@ pub enum PlanStmt {
     /// A bare tool call whose output is discarded, e.g. `call fake.email.send { ... }`.
     Call { call: PlanCall, span: Span },
     /// `approve "summary" { body }` — a human approval gate over a sub-plan. The
-    /// body runs only after a `tach goal approve` grants the gate.
+    /// body runs only after a `perdure goal approve` grants the gate.
     Approve {
         summary: String,
         body: Vec<PlanStmt>,

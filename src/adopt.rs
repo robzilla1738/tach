@@ -1,13 +1,13 @@
-//! Adopting an existing repo: `tach init --existing` and `tach goal init`.
+//! Adopting an existing repo: `perdure init --existing` and `perdure goal init`.
 //!
-//! `tach new` scaffolds a fresh toy-language project. This is the opposite move:
-//! take a real Rust/JS/Go/Python repo and lay a Tach control plane *over* it
+//! `perdure new` scaffolds a fresh toy-language project. This is the opposite move:
+//! take a real Rust/JS/Go/Python repo and lay a Perdure control plane *over* it
 //! without touching a line of its source. We write three small files —
 //!
-//!   * `Tachfile`      — the coding goal (authority + the command that proves it)
-//!   * `TACH_AGENT.md` — the operating contract an external agent reads
+//!   * `Perdurefile`      — the coding goal (authority + the command that proves it)
+//!   * `PERDURE_AGENT.md` — the operating contract an external agent reads
 //!   * `AGENTS.md`     — the generic, vendor-neutral contract (only if absent)
-//!   * `.tachignore`   — what the snapshot/diff gate skips
+//!   * `.perdureignore`   — what the snapshot/diff gate skips
 //!
 //! and detect the project's test command so the goal is useful out of the box.
 
@@ -91,16 +91,16 @@ fn js_test_command(pm: &str) -> String {
     }
 }
 
-/// The test command an adopted Tachfile carries when Tach could not detect the repo's
+/// The test command an adopted Perdurefile carries when Perdure could not detect the repo's
 /// real one. Deliberately *not* prefixed with `echo`: run as-is it is "command not
 /// found" — a non-zero exit — so a guard can never vacuously verify against an
-/// unresolved placeholder. `tach guard begin` also recognizes this marker and refuses
+/// unresolved placeholder. `perdure guard begin` also recognizes this marker and refuses
 /// to open a session until a human supplies the real command. A safe placeholder beats
 /// a convenient one.
 pub const PLACEHOLDER_COMMAND: &str = "set-your-test-command";
 
 /// The default `Detected` used when nothing matched, so adoption still produces a
-/// well-formed Tachfile (with a clearly-marked placeholder command to fill in).
+/// well-formed Perdurefile (with a clearly-marked placeholder command to fill in).
 fn placeholder() -> Detected {
     Detected {
         command: PLACEHOLDER_COMMAND.into(),
@@ -128,7 +128,7 @@ fn template(goal_id: &str, d: &Detected) -> io::Result<(&'static str, String)> {
     }
 }
 
-/// Render the `Tachfile` for a goal, in canonical (fmt) form so `tach fmt` is a
+/// Render the `Perdurefile` for a goal, in canonical (fmt) form so `perdure fmt` is a
 /// no-op on it. Built from a draft and normalized by the formatter so glob lists
 /// and spacing always match the one canonical spelling.
 pub fn coding_goal_source(name: &str, command: &str, write_globs: &[String]) -> String {
@@ -145,48 +145,48 @@ pub fn coding_goal_source(name: &str, command: &str, write_globs: &[String]) -> 
     );
     // Normalize through the formatter; on the off chance it can't parse, the draft
     // is already close to canonical.
-    fmt::format_file("Tachfile", &draft).unwrap_or(draft)
+    fmt::format_file("Perdurefile", &draft).unwrap_or(draft)
 }
 
-/// The operating contract written to `TACH_AGENT.md`. Deliberately blunt about the
-/// one rule that matters: never claim done unless Tach says `verified: true`.
-pub fn tach_agent_md(goal_name: &str, command: &str) -> String {
+/// The operating contract written to `PERDURE_AGENT.md`. Deliberately blunt about the
+/// one rule that matters: never claim done unless Perdure says `verified: true`.
+pub fn perdure_agent_md(goal_name: &str, command: &str) -> String {
     format!(
-        r#"# Tach guard — operating contract for AI coding agents
+        r#"# Perdure guard — operating contract for AI coding agents
 
-This repository is operated through **Tach**: a runtime that scopes, verifies, and
-records your work. You bring the reasoning and the edits; Tach is the guardrail and
+This repository is operated through **Perdure**: a runtime that scopes, verifies, and
+records your work. You bring the reasoning and the edits; Perdure is the guardrail and
 the durable ledger. Follow this contract.
 
 ## Open a session
-    tach guard begin {goal_name}
-    tach guard context --json                      # the contract for this run
-    tach guard context --for-agent generic --json  # the full agent packet (changes, receipts, next move)
-    tach guard next --json                          # just the single next required action
+    perdure guard begin {goal_name}
+    perdure guard context --json                      # the contract for this run
+    perdure guard context --for-agent generic --json  # the full agent packet (changes, receipts, next move)
+    perdure guard next --json                          # just the single next required action
 
 `context` reports:
   - allowed_files     — globs you may edit; edits elsewhere are rejected at the gate
-  - allowed_commands  — the only commands Tach will run for you
+  - allowed_commands  — the only commands Perdure will run for you
   - current_failure   — what is failing right now (or null)
   - next_required_action
 
 ## While you work
   - Edit only files matching `allowed_files`. An edit outside that scope is an
-    out-of-scope write: Tach records it and it will block the commit. Tach detects
+    out-of-scope write: Perdure records it and it will block the commit. Perdure detects
     and rejects such edits at the gate — it does not silently prevent the write, so
     staying in scope is on you.
-  - Run project commands through `tach guard verify`, not directly, so each run is
+  - Run project commands through `perdure guard verify`, not directly, so each run is
     captured as a receipt.
 
 ## Before you claim done
-  - Run `tach guard verify` and read the JSON.
-  - **Do not tell the user the task is done unless Tach reports `verified: true`.**
+  - Run `perdure guard verify` and read the JSON.
+  - **Do not tell the user the task is done unless Perdure reports `verified: true`.**
     `verified` is true only when every required command passed AND no out-of-scope
     file changed. The `done_condition` field of `context --json` states this check.
-  - Finish with `tach guard finalize` (alias: `tach guard commit`). This finalizes the
-    run into **Tach's own ledger only — it does not create a git commit or touch git in
+  - Finish with `perdure guard finalize` (alias: `perdure guard commit`). This finalizes the
+    run into **Perdure's own ledger only — it does not create a git commit or touch git in
     any way.** Staging, committing, or pushing to git is yours to do (or not), separately.
-  - If `finalize` refuses, run `tach guard diff --json`, fix the violations, and verify
+  - If `finalize` refuses, run `perdure guard diff --json`, fix the violations, and verify
     again.
 
 Goal: {goal_name}
@@ -195,69 +195,69 @@ Verified by: `{command}`
     )
 }
 
-/// The marker on the first line of a Tach-generated `AGENTS.md`. Its presence is
+/// The marker on the first line of a Perdure-generated `AGENTS.md`. Its presence is
 /// how we tell "this AGENTS.md is ours and `--force` may regenerate it" from a
 /// user-authored one, which we must never touch.
-pub const AGENTS_SENTINEL: &str = "<!-- tach:agents-contract v1 -->";
+pub const AGENTS_SENTINEL: &str = "<!-- perdure:agents-contract v1 -->";
 
 /// The generic, vendor-neutral operating contract written to `AGENTS.md` — the file
-/// many coding agents read by convention. Unlike `TACH_AGENT.md` (Tach-owned), this
+/// many coding agents read by convention. Unlike `PERDURE_AGENT.md` (Perdure-owned), this
 /// is the shared community file, so it is only ever written when absent, and only
 /// overwritten by `--force` when it still carries our sentinel.
-pub fn tach_agents_md(goal_name: &str, command: &str) -> String {
+pub fn perdure_agents_md(goal_name: &str, command: &str) -> String {
     format!(
         r#"{AGENTS_SENTINEL}
 # Agent operating contract
 
-This repository is governed by **Tach**: a runtime that scopes, verifies, and records
-the work of AI coding agents. Tach does not write code — you do. Tach is the guardrail
+This repository is governed by **Perdure**: a runtime that scopes, verifies, and records
+the work of AI coding agents. Perdure does not write code — you do. Perdure is the guardrail
 and the durable ledger. Any agent operating here follows this contract.
 
 ## Before you edit
 Read the machine-readable contract for the active session:
 
-    tach guard context --for-agent generic --json
+    perdure guard context --for-agent generic --json
 
-It reports `allowed_files` (what you may edit), `allowed_commands` (what Tach will run),
+It reports `allowed_files` (what you may edit), `allowed_commands` (what Perdure will run),
 `required_commands`, the current failure, the `done_condition`, and the single
 `next_action`. If no session is open yet, open one:
 
-    tach guard begin {goal_name}
+    perdure guard begin {goal_name}
 
 To ask only "what do I do next?":
 
-    tach guard next --json
+    perdure guard next --json
 
 ## While you work
   - Edit only files matching `allowed_files`. An edit outside that scope is an
-    out-of-scope write: Tach detects and rejects it at the gate and it blocks
-    finalization. Tach does not silently prevent the write, so staying in scope is on you.
-  - Run project commands through `tach guard verify`, never directly, so each run is
+    out-of-scope write: Perdure detects and rejects it at the gate and it blocks
+    finalization. Perdure does not silently prevent the write, so staying in scope is on you.
+  - Run project commands through `perdure guard verify`, never directly, so each run is
     captured as a receipt with its stdout/stderr.
 
 ## Before you claim done
-  - Run `tach guard verify` and read the JSON (or `tach guard status --json`).
-  - **Do not tell the user the task is done unless Tach reports `verified: true`.** That
+  - Run `perdure guard verify` and read the JSON (or `perdure guard status --json`).
+  - **Do not tell the user the task is done unless Perdure reports `verified: true`.** That
     bit is true only when every required command passed AND no out-of-scope file changed.
   - If verify is refused, its JSON carries `rejection` (what to fix — `scope_violations`
     lists the exact paths) and `recommended_command` (what to run next).
 
 ## Finalize
-    tach guard finalize        # alias: tach guard commit
+    perdure guard finalize        # alias: perdure guard commit
 
 **Finalization is ledger-only — it does not create a git commit or touch git in any
 way.** Staging, committing, or pushing to git is yours to do (or not), separately.
 
 ---
-Generated by `tach init --existing`. Goal: {goal_name}; verified by `{command}`.
-Tach-specific operating details live in `TACH_AGENT.md`.
+Generated by `perdure init --existing`. Goal: {goal_name}; verified by `{command}`.
+Perdure-specific operating details live in `PERDURE_AGENT.md`.
 "#
     )
 }
 
-/// What `.tachignore` ships with: heavy build/dependency roots the snapshot gate
-/// should never walk. (Dotdirs and `.tach/` are always skipped regardless.)
-pub const DEFAULT_TACHIGNORE: &str = "# Paths the Tach scope/diff gate ignores.\n\
+/// What `.perdureignore` ships with: heavy build/dependency roots the snapshot gate
+/// should never walk. (Dotdirs and `.perdure/` are always skipped regardless.)
+pub const DEFAULT_TACHIGNORE: &str = "# Paths the Perdure scope/diff gate ignores.\n\
     target\n\
     node_modules\n\
     dist\n\
@@ -266,13 +266,13 @@ pub const DEFAULT_TACHIGNORE: &str = "# Paths the Tach scope/diff gate ignores.\
     __pycache__\n\
     *.log\n";
 
-/// Write the Tachfile for `goal_id`, detecting the test command. Overwrites an
-/// existing Tachfile (the goal definition is meant to be regenerated/edited).
+/// Write the Perdurefile for `goal_id`, detecting the test command. Overwrites an
+/// existing Perdurefile (the goal definition is meant to be regenerated/edited).
 pub fn goal_init(repo: &Path, goal_id: &str) -> io::Result<(PathBuf, String, String)> {
     let d = detect(repo).unwrap_or_else(placeholder);
     let (name, command) = template(goal_id, &d)?;
     let src = coding_goal_source(name, &command, &d.write_globs);
-    let path = repo.join("Tachfile");
+    let path = repo.join("Perdurefile");
     fs::write(&path, &src)?;
     Ok((path, name.to_string(), command))
 }
@@ -289,7 +289,7 @@ pub struct InitReport {
 
 /// Decide whether `init --existing` should (over)write `AGENTS.md`. Returns `true`
 /// to write it: when it is absent, or when `--force` is given *and* the existing file
-/// still carries our sentinel (i.e. it is a previously-generated Tach file). A
+/// still carries our sentinel (i.e. it is a previously-generated Perdure file). A
 /// user-authored `AGENTS.md` (no sentinel) is never touched, even with `--force`.
 fn write_agents_md(path: &Path, force: bool) -> io::Result<bool> {
     if !path.exists() {
@@ -302,8 +302,8 @@ fn write_agents_md(path: &Path, force: bool) -> io::Result<bool> {
     Ok(existing.contains(AGENTS_SENTINEL))
 }
 
-/// Adopt an existing repo: write `Tachfile`, `TACH_AGENT.md`, `AGENTS.md`, and
-/// `.tachignore`. Never scaffolds source. Tach-owned files are overwritten by
+/// Adopt an existing repo: write `Perdurefile`, `PERDURE_AGENT.md`, `AGENTS.md`, and
+/// `.perdureignore`. Never scaffolds source. Perdure-owned files are overwritten by
 /// `--force`; a user-authored `AGENTS.md` is never touched.
 pub fn init_existing(repo: &Path, force: bool) -> io::Result<InitReport> {
     let detected = detect(repo);
@@ -313,23 +313,23 @@ pub fn init_existing(repo: &Path, force: bool) -> io::Result<InitReport> {
     let mut written = Vec::new();
     let mut skipped = Vec::new();
 
-    let tachfile = repo.join("Tachfile");
-    if tachfile.exists() && !force {
-        skipped.push(tachfile);
+    let perdurefile = repo.join("Perdurefile");
+    if perdurefile.exists() && !force {
+        skipped.push(perdurefile);
     } else {
         fs::write(
-            &tachfile,
+            &perdurefile,
             coding_goal_source(goal_name, &command, &d.write_globs),
         )?;
-        written.push(tachfile);
+        written.push(perdurefile);
     }
 
-    // `TACH_AGENT.md` is Tach-owned: written fresh, overwritten by `--force`.
-    let agent = repo.join("TACH_AGENT.md");
+    // `PERDURE_AGENT.md` is Perdure-owned: written fresh, overwritten by `--force`.
+    let agent = repo.join("PERDURE_AGENT.md");
     if agent.exists() && !force {
         skipped.push(agent);
     } else {
-        fs::write(&agent, tach_agent_md(goal_name, &command))?;
+        fs::write(&agent, perdure_agent_md(goal_name, &command))?;
         written.push(agent);
     }
 
@@ -338,13 +338,13 @@ pub fn init_existing(repo: &Path, force: bool) -> io::Result<InitReport> {
     // regenerates it only if it still carries our sentinel.
     let agents = repo.join("AGENTS.md");
     if write_agents_md(&agents, force)? {
-        fs::write(&agents, tach_agents_md(goal_name, &command))?;
+        fs::write(&agents, perdure_agents_md(goal_name, &command))?;
         written.push(agents);
     } else {
         skipped.push(agents);
     }
 
-    let ignore = repo.join(".tachignore");
+    let ignore = repo.join(".perdureignore");
     if ignore.exists() && !force {
         skipped.push(ignore);
     } else {
@@ -372,7 +372,7 @@ mod tests {
             static N: AtomicU64 = AtomicU64::new(0);
             let n = N.fetch_add(1, Ordering::Relaxed);
             let dir = std::env::temp_dir().join(format!(
-                "tach_adopt_{}_{}_{}",
+                "perdure_adopt_{}_{}_{}",
                 std::process::id(),
                 tag,
                 n
@@ -417,7 +417,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_tachfile_is_canonical_and_parses() {
+    fn generated_perdurefile_is_canonical_and_parses() {
         let d = Detected {
             command: "cargo test".into(),
             typecheck: None,
@@ -427,14 +427,14 @@ mod tests {
         let src = coding_goal_source("FixFailingTests", &d.command, &d.write_globs);
         // A fmt fixed point.
         assert_eq!(
-            fmt::format_file("Tachfile", &src).unwrap(),
+            fmt::format_file("Perdurefile", &src).unwrap(),
             src,
-            "generated Tachfile is not canonical"
+            "generated Perdurefile is not canonical"
         );
         // Parses + checks cleanly (no E0431 on the command require form).
         let (prog, pdiags) =
             crate::program::Program::parse_sources(vec![crate::source::SourceFile::new(
-                "Tachfile", src,
+                "Perdurefile", src,
             )]);
         assert!(pdiags.iter().all(|x| !x.is_error()), "parse: {pdiags:?}");
         let cdiags = crate::check::check_program(&prog);
@@ -454,12 +454,12 @@ mod tests {
         r.touch("Cargo.toml", "[package]\nname=\"x\"\n");
         let rep = init_existing(r.path(), false).unwrap();
         assert_eq!(rep.written.len(), 4);
-        assert!(r.path().join("Tachfile").exists());
-        assert!(r.path().join("TACH_AGENT.md").exists());
+        assert!(r.path().join("Perdurefile").exists());
+        assert!(r.path().join("PERDURE_AGENT.md").exists());
         assert!(r.path().join("AGENTS.md").exists());
-        assert!(r.path().join(".tachignore").exists());
+        assert!(r.path().join(".perdureignore").exists());
         // No toy source scaffolded.
-        assert!(!r.path().join("src/main.tach").exists());
+        assert!(!r.path().join("src/main.pdr").exists());
 
         // Re-running without --force skips all four.
         let rep2 = init_existing(r.path(), false).unwrap();
@@ -475,7 +475,7 @@ mod tests {
         init_existing(r.path(), false).unwrap();
         let generated = fs::read_to_string(r.path().join("AGENTS.md")).unwrap();
         assert!(generated.contains(AGENTS_SENTINEL));
-        assert!(generated.contains("tach guard context --for-agent generic --json"));
+        assert!(generated.contains("perdure guard context --for-agent generic --json"));
         assert!(generated.contains("ledger-only") || generated.contains("ledger"));
 
         // --force regenerates our own (sentinel-bearing) file.

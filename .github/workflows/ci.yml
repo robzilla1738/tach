@@ -58,15 +58,15 @@ jobs:
       - name: End-to-end agent interface (generate AGENTS.md → schema-matched context/next/verify → repairable rejection → finalize ≡ commit)
         run: bash scripts/agent_interface_e2e.sh
 
-      - name: Tach format check (corpus)
+      - name: Perdure format check (corpus)
         run: |
           for d in corpus/*/; do
-            ( cd "$d" && "$GITHUB_WORKSPACE/target/release/tach" fmt --check )
+            ( cd "$d" && "$GITHUB_WORKSPACE/target/release/perdure" fmt --check )
           done
 
       - name: Schemas are valid JSON and match emitted samples
         run: |
-          BIN="$GITHUB_WORKSPACE/target/release/tach"
+          BIN="$GITHUB_WORKSPACE/target/release/perdure"
           for name in diagnostic patch event goal run approval receipt bench test \
                       guard-context guard-status guard-diff guard-verify guard-commit \
                       guard-next agent-context; do

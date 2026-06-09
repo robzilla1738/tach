@@ -1,6 +1,6 @@
-//! Real local command execution — the one place in Tach that spawns a process.
+//! Real local command execution — the one place in Perdure that spawns a process.
 //!
-//! Everywhere else, Tach is a hermetic simulation: it works an in-memory
+//! Everywhere else, Perdure is a hermetic simulation: it works an in-memory
 //! workspace and calls fake, side-effect-free tools. The coding harness is the
 //! deliberate exception — to verify an external agent's edits it must run the
 //! project's real test command. This module is the narrow, audited gate for that:
@@ -348,7 +348,7 @@ mod tests {
             static N: AtomicU64 = AtomicU64::new(0);
             let n = N.fetch_add(1, Ordering::Relaxed);
             let dir =
-                std::env::temp_dir().join(format!("tach_sh_{}_{}_{}", std::process::id(), tag, n));
+                std::env::temp_dir().join(format!("perdure_sh_{}_{}_{}", std::process::id(), tag, n));
             let _ = fs::remove_dir_all(&dir);
             fs::create_dir_all(&dir).unwrap();
             TempDir(dir)

@@ -1,5 +1,5 @@
-//! Project I/O: discovering `.tach` files into a `Workspace`, writing verified
-//! results back, and scaffolding new projects with `tach new`.
+//! Project I/O: discovering `.pdr` files into a `Workspace`, writing verified
+//! results back, and scaffolding new projects with `perdure new`.
 
 use crate::diagnostics::Diagnostic;
 use crate::patch::Workspace;
@@ -11,14 +11,14 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 /// The conventional name of a coding goal file at a real repo's root. Unlike toy
-/// `.tach` source, a `Tachfile` is the one place a coding goal lives, so a real
-/// Rust/JS repo (which has no `.tach` files) is still adoptable. Written by
-/// `tach init --existing` and parsed with the same goal grammar.
-pub const TACHFILE: &str = "Tachfile";
+/// `.pdr` source, a `Perdurefile` is the one place a coding goal lives, so a real
+/// Rust/JS repo (which has no `.pdr` files) is still adoptable. Written by
+/// `perdure init --existing` and parsed with the same goal grammar.
+pub const TACHFILE: &str = "Perdurefile";
 
-/// Load and parse the repo's `Tachfile`, if present, into a `Program` plus its
+/// Load and parse the repo's `Perdurefile`, if present, into a `Program` plus its
 /// parse diagnostics. Used by the guard runtime to resolve a coding goal — it does
-/// not go through `load_workspace`, which only sees `*.tach`.
+/// not go through `load_workspace`, which only sees `*.pdr`.
 pub fn load_goal_file(repo: &Path) -> io::Result<(Program, Vec<Diagnostic>)> {
     let path = repo.join(TACHFILE);
     let text = fs::read_to_string(&path)?;
@@ -28,7 +28,7 @@ pub fn load_goal_file(repo: &Path) -> io::Result<(Program, Vec<Diagnostic>)> {
     )]))
 }
 
-/// Load every `.tach` file under `root` into a workspace, keyed by path relative
+/// Load every `.pdr` file under `root` into a workspace, keyed by path relative
 /// to `root` (using forward slashes for stability).
 pub fn load_workspace(root: &Path) -> io::Result<Workspace> {
     let mut ws = Workspace::new();
@@ -43,11 +43,11 @@ fn collect(base: &Path, dir: &Path, ws: &mut Workspace) -> io::Result<()> {
         let p = e.path();
         let name = e.file_name().to_string_lossy().to_string();
         if p.is_dir() {
-            if matches!(name.as_str(), "target" | ".tach" | ".git") || name.starts_with('.') {
+            if matches!(name.as_str(), "target" | ".perdure" | ".git") || name.starts_with('.') {
                 continue;
             }
             collect(base, &p, ws)?;
-        } else if p.extension().is_some_and(|x| x == "tach") {
+        } else if p.extension().is_some_and(|x| x == "pdr") {
             let rel = p
                 .strip_prefix(base)
                 .unwrap_or(&p)
@@ -61,8 +61,8 @@ fn collect(base: &Path, dir: &Path, ws: &mut Workspace) -> io::Result<()> {
 }
 
 /// Load every immediate subdirectory of `dir` as its own project workspace,
-/// returned sorted by case name. Subdirectories with no `.tach` files are
-/// skipped. Used by `tach bench --suite` to run the repair corpus.
+/// returned sorted by case name. Subdirectories with no `.pdr` files are
+/// skipped. Used by `perdure bench --suite` to run the repair corpus.
 pub fn load_suite(dir: &Path) -> io::Result<Vec<(String, Workspace)>> {
     let mut cases = Vec::new();
     let mut entries: Vec<_> = fs::read_dir(dir)?.collect::<Result<_, _>>()?;
@@ -114,9 +114,9 @@ pub fn write_back(
 }
 
 /// Scaffold a new project at `root/name`. By default this is the deliberately
-/// broken auth demo (so `tach fix` has something to do); `--clean` produces a
+/// broken auth demo (so `perdure fix` has something to do); `--clean` produces a
 /// minimal green project, and `plan_template` (e.g. `chargebacks`) produces a
-/// workspace-authored plan goal ready to `tach goal run`.
+/// workspace-authored plan goal ready to `perdure goal run`.
 pub fn scaffold(
     parent: &Path,
     name: &str,
@@ -135,20 +135,20 @@ pub fn scaffold(
             }
         };
         fs::create_dir_all(&root)?;
-        fs::write(root.join("Tach.toml"), manifest(name))?;
-        fs::write(root.join("goal.tach"), src)?;
+        fs::write(root.join("Perdure.toml"), manifest(name))?;
+        fs::write(root.join("goal.pdr"), src)?;
         return Ok(root);
     }
     fs::create_dir_all(root.join("src"))?;
     fs::create_dir_all(root.join("tests"))?;
-    fs::write(root.join("Tach.toml"), manifest(name))?;
+    fs::write(root.join("Perdure.toml"), manifest(name))?;
     if clean {
-        fs::write(root.join("src/main.tach"), CLEAN_MAIN)?;
-        fs::write(root.join("tests/main_test.tach"), CLEAN_TEST)?;
+        fs::write(root.join("src/main.pdr"), CLEAN_MAIN)?;
+        fs::write(root.join("tests/main_test.pdr"), CLEAN_TEST)?;
     } else {
-        fs::write(root.join("src/auth.tach"), DEMO_AUTH)?;
-        fs::write(root.join("tests/auth_test.tach"), DEMO_TEST)?;
-        fs::write(root.join("goal.tach"), DEMO_GOAL)?;
+        fs::write(root.join("src/auth.pdr"), DEMO_AUTH)?;
+        fs::write(root.join("tests/auth_test.pdr"), DEMO_TEST)?;
+        fs::write(root.join("goal.pdr"), DEMO_GOAL)?;
     }
     Ok(root)
 }
@@ -161,10 +161,10 @@ fn manifest(name: &str) -> String {
 ///   1. `log` is used but never imported          -> E0322 unknown_module
 ///   2. `load_session` performs undeclared effects -> E0421 effect_undeclared
 ///   3. `session_summary` returns Int as String    -> E0309 type_mismatch
-pub const DEMO_AUTH: &str = r#"// auth.tach — session loading.
+pub const DEMO_AUTH: &str = r#"// auth.pdr — session loading.
 //
-// This file ships with three planted bugs. Run `tach check` to see them, then
-// `tach fix` to watch the compiler-as-agent-harness drive it to green.
+// This file ships with three planted bugs. Run `perdure check` to see them, then
+// `perdure fix` to watch the compiler-as-agent-harness drive it to green.
 
 import db
 import time
@@ -187,7 +187,7 @@ fn session_summary(s: Session) -> String {
 }
 "#;
 
-pub const DEMO_TEST: &str = r#"// auth_test.tach — these pass once the code compiles cleanly.
+pub const DEMO_TEST: &str = r#"// auth_test.pdr — these pass once the code compiles cleanly.
 
 import db
 
@@ -207,10 +207,10 @@ test "missing session rejected" {
 "#;
 
 /// The demo's goal: a durable, budgeted, authority-scoped contract for driving
-/// the planted-bug project from red to green. `tach goal run FixFailingTests`
-/// executes the same repair loop as `tach fix`, but checkpointed and resumable,
+/// the planted-bug project from red to green. `perdure goal run FixFailingTests`
+/// executes the same repair loop as `perdure fix`, but checkpointed and resumable,
 /// and refuses any patch that would write outside `src/**`/`tests/**` or perform
-/// an effect it was never granted. Written in canonical form so `tach fmt` is a
+/// an effect it was never granted. Written in canonical form so `perdure fmt` is a
 /// no-op on a fresh project.
 pub const DEMO_GOAL: &str = r#"goal FixFailingTests -> Success {
   budget {
@@ -231,13 +231,13 @@ pub const DEMO_GOAL: &str = r#"goal FixFailingTests -> Success {
 }
 "#;
 
-/// A workspace-authored plan goal (`tach new <name> --goal chargebacks`). It is a
+/// A workspace-authored plan goal (`perdure new <name> --goal chargebacks`). It is a
 /// durable workflow, not a repair run: it lists a customer's disputed charges,
 /// loops over them, and refunds the duplicates behind a per-charge approval gate —
 /// exactly the shape of the built-in `ReconcileChargebacks`, but living in the
 /// user's own file under a distinct name, so it runs entirely off the binary's
 /// catalog and resumes/replays from the source snapshot. Written canonically so
-/// `tach fmt` is a no-op.
+/// `perdure fmt` is a no-op.
 pub const PLAN_DEMO_CHARGEBACKS: &str = r#"goal ReconcileLocalDemo -> Success {
   budget {
     steps: 60
@@ -288,12 +288,12 @@ fn greet(name: String) -> String {
 }
 
 fn main() -> String effects [log.write] {
-  log.info("tach is online")
+  log.info("perdure is online")
   return greet("world")
 }
 "#;
 
 pub const CLEAN_TEST: &str = r#"test "greet echoes its argument" {
-  ensure greet("tach") == "tach"
+  ensure greet("perdure") == "perdure"
 }
 "#;

@@ -1,4 +1,4 @@
-//! Persisting agent runs so `tach trace` and `tach replay` can re-open them.
+//! Persisting agent runs so `perdure trace` and `perdure replay` can re-open them.
 //!
 //! The trace stores the *initial* file contents, every lap, and the final
 //! result. Because runs are deterministic, the base files are all `replay`
@@ -17,11 +17,11 @@ pub enum TraceFile {
 }
 
 fn trace_path(root: &Path) -> std::path::PathBuf {
-    root.join(".tach").join("trace.json")
+    root.join(".perdure").join("trace.json")
 }
 
 pub fn save(root: &Path, trace: &TraceFile) -> std::io::Result<()> {
-    let dir = root.join(".tach");
+    let dir = root.join(".perdure");
     fs::create_dir_all(&dir)?;
     let json = serde_json::to_string_pretty(trace).unwrap_or_else(|_| "{}".into());
     fs::write(trace_path(root), json)

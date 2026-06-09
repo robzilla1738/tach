@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://tach.dev/schemas/event.schema.json",
-  "title": "Tach Goal Event",
-  "description": "One immutable, tamper-evident entry in a goal run's append-only history (events.jsonl). Each line of the log is one event. Carries a logical sequence number rather than a wall clock (so deterministic runs chain identically) and a SHA-256 hash chain (prev_hash/entry_hash) so any edit, insertion, removal, or reorder is detectable by `tach guard audit`.",
+  "$id": "https://perdure.dev/schemas/event.schema.json",
+  "title": "Perdure Goal Event",
+  "description": "One immutable, tamper-evident entry in a goal run's append-only history (events.jsonl). Each line of the log is one event. Carries a logical sequence number rather than a wall clock (so deterministic runs chain identically) and a SHA-256 hash chain (prev_hash/entry_hash) so any edit, insertion, removal, or reorder is detectable by `perdure guard audit`.",
   "type": "object",
   "required": ["schema", "event_id", "run_id", "seq", "kind", "timestamp_mode", "payload", "prev_hash", "entry_hash"],
   "additionalProperties": false,

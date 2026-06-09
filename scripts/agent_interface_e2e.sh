@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
 # End-to-end test of AGENT INTERFACE v1 — the structured front door an external
-# coding agent (Claude Code, Codex, Cursor-style, local) uses to operate Tach from
+# coding agent (Claude Code, Codex, Cursor-style, local) uses to operate Perdure from
 # the outside. `scripts/guard_e2e.sh` covers the guard session itself; this proves
-# the agent-facing surface added on top, driven entirely through the `tach` binary.
+# the agent-facing surface added on top, driven entirely through the `perdure` binary.
 #
 # It proves, against the binary:
-#   - `tach init --existing` GENERATES a vendor-neutral `AGENTS.md` (with the Tach
+#   - `perdure init --existing` GENERATES a vendor-neutral `AGENTS.md` (with the Perdure
 #     sentinel and the `context --for-agent generic` instruction) when none exists.
-#   - `tach guard context --for-agent generic --json` emits EXACTLY the field set its
-#     published schema (`tach schema agent-context`) promises — output and contract
+#   - `perdure guard context --for-agent generic --json` emits EXACTLY the field set its
+#     published schema (`perdure schema agent-context`) promises — output and contract
 #     cannot drift apart.
-#   - `tach guard next --json` returns a single next action whose value tracks state:
+#   - `perdure guard next --json` returns a single next action whose value tracks state:
 #     edit_then_verify → fix_scope_violation → finalize → done.
 #   - an out-of-scope edit makes `verify --json` return machine-actionable repair
 #     hints: a `scope_violation` rejection naming the path, the allowed scope, named
 #     `repair_strategies`, and a `preferred_next_action` of revert_file.
-#   - `tach guard finalize` and the `tach guard commit` alias are equivalent,
+#   - `perdure guard finalize` and the `perdure guard commit` alias are equivalent,
 #     ledger-only operations: both reach `completed` and neither creates a git repo.
-#   - `tach serve-mcp` speaks JSON-RPC 2.0 over stdio (initialize → tools/list →
+#   - `perdure serve-mcp` speaks JSON-RPC 2.0 over stdio (initialize → tools/list →
 #     tools/call), exposes only safe guard/goal tools, and never a raw-shell tool.
 #
 # Hermetic + toolchain-free: the allowlisted command is a trivial committed `check.sh`
@@ -27,7 +27,7 @@ export NO_COLOR=1
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cargo build --release --manifest-path "$ROOT/Cargo.toml"
-BIN="$ROOT/target/release/tach"
+BIN="$ROOT/target/release/perdure"
 
 WORK="$(mktemp -d)"
 SCRATCH="$(mktemp -d)"   # for tool output we must NOT write inside the guarded repo
@@ -50,16 +50,16 @@ echo '# Fixture' > README.md
 echo 'grep -q FIXMARKER src/lib.rs && exit 0 || exit 1' > check.sh
 
 # ---------------------------------------------------------------------------
-echo "## tach init --existing  (must GENERATE AGENTS.md, vendor-neutral, with the sentinel)"
+echo "## perdure init --existing  (must GENERATE AGENTS.md, vendor-neutral, with the sentinel)"
 "$BIN" init --existing >/dev/null
 [ -f AGENTS.md ] || { echo "FAIL: init did not generate AGENTS.md"; exit 1; }
-head -1 AGENTS.md | grep -q 'tach:agents-contract' || { echo "FAIL: AGENTS.md missing the Tach sentinel"; exit 1; }
-grep -q 'tach guard context --for-agent generic --json' AGENTS.md || { echo "FAIL: AGENTS.md does not instruct the agent to read the generic context"; exit 1; }
+head -1 AGENTS.md | grep -q 'perdure:agents-contract' || { echo "FAIL: AGENTS.md missing the Perdure sentinel"; exit 1; }
+grep -q 'perdure guard context --for-agent generic --json' AGENTS.md || { echo "FAIL: AGENTS.md does not instruct the agent to read the generic context"; exit 1; }
 grep -qi 'ledger-only' AGENTS.md || { echo "FAIL: AGENTS.md does not say finalize is ledger-only"; exit 1; }
 echo "   ok — AGENTS.md generated with the operating contract"
 
 echo "## point the goal at the trivial check.sh command (keeps CI toolchain-free)"
-cat > Tachfile <<'EOF'
+cat > Perdurefile <<'EOF'
 goal FixFailingTests -> Success {
   budget {
     steps: 40
@@ -76,7 +76,7 @@ goal FixFailingTests -> Success {
 EOF
 
 # ---------------------------------------------------------------------------
-echo "## tach guard begin"
+echo "## perdure guard begin"
 RUN_ID="$("$BIN" guard begin FixFailingTests --json | jget '["run_id"]')"
 [ -n "$RUN_ID" ] || { echo "FAIL: no run id"; exit 1; }
 
@@ -157,7 +157,7 @@ echo '// FIXMARKER applied' > src/lib.rs # the in-scope fix
 N="$("$BIN" guard next --json)"
 [ "$(echo "$N" | jget '["status"]')" = verified ] || { echo "FAIL: status not verified after green verify"; exit 1; }
 [ "$(echo "$N" | jget '["next_action"]')" = finalize ] || { echo "FAIL: next_action not finalize"; exit 1; }
-[ "$(echo "$N" | jget '["recommended_command"]')" = "tach guard finalize" ] || { echo "FAIL: recommended_command not finalize"; exit 1; }
+[ "$(echo "$N" | jget '["recommended_command"]')" = "perdure guard finalize" ] || { echo "FAIL: recommended_command not finalize"; exit 1; }
 # Agent context now shows the passing receipt with its captured artifact.
 "$BIN" guard context --for-agent generic --json > "$SCRATCH/ctx2.json"
 python3 - "$SCRATCH/ctx2.json" <<'PY'
@@ -172,7 +172,7 @@ PY
 
 echo "## finalize via the preferred spelling (ledger only; git untouched)"
 "$BIN" guard finalize >/dev/null
-[ "$(python3 -c 'import json;print(json.load(open(".tach/goals/'"$RUN_ID"'/state.json"))["status"])')" = completed ] || { echo "FAIL: run not completed"; exit 1; }
+[ "$(python3 -c 'import json;print(json.load(open(".perdure/goals/'"$RUN_ID"'/state.json"))["status"])')" = completed ] || { echo "FAIL: run not completed"; exit 1; }
 [ ! -d .git ] || { echo "FAIL: finalize created a .git directory"; exit 1; }
 N="$("$BIN" guard next --json "$RUN_ID")"
 [ "$(echo "$N" | jget '["next_action"]')" = done ] || { echo "FAIL: finalized run next_action not done"; exit 1; }
@@ -182,29 +182,29 @@ echo '## prove `commit` is an equivalent ledger-only alias: a second run finaliz
 RUN2="$("$BIN" guard begin FixFailingTests --json | jget '["run_id"]')"  # FIXMARKER already present → verifies green
 "$BIN" guard verify >/dev/null
 "$BIN" guard commit >/dev/null
-S2="$(python3 -c 'import json;print(json.load(open(".tach/goals/'"$RUN2"'/state.json"))["status"])')"
+S2="$(python3 -c 'import json;print(json.load(open(".perdure/goals/'"$RUN2"'/state.json"))["status"])')"
 [ "$S2" = completed ] || { echo "FAIL: commit alias did not reach completed"; exit 1; }
-grep -q '"guard.committed"' ".tach/goals/$RUN2/events.jsonl" || { echo "FAIL: commit alias recorded no guard.committed event"; exit 1; }
+grep -q '"guard.committed"' ".perdure/goals/$RUN2/events.jsonl" || { echo "FAIL: commit alias recorded no guard.committed event"; exit 1; }
 [ ! -d .git ] || { echo "FAIL: commit alias created a .git directory"; exit 1; }
 echo "   ok — finalize and commit both reach completed, ledger-only, git untouched"
 
 # ---------------------------------------------------------------------------
-echo "## tach serve-mcp (server-only MCP over stdio): initialize → tools/list → goal_receipts"
+echo "## perdure serve-mcp (server-only MCP over stdio): initialize → tools/list → goal_receipts"
 printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' \
   '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
-  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"tach_goal_receipts","arguments":{"run_id":"'"$RUN_ID"'"}}}' \
+  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"perdure_goal_receipts","arguments":{"run_id":"'"$RUN_ID"'"}}}' \
   | "$BIN" serve-mcp > "$SCRATCH/mcp.out"
 python3 - "$SCRATCH/mcp.out" <<'PY'
 import json, sys
 msgs = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
 assert len(msgs) == 3, f"expected 3 responses (the notification gets none), got {len(msgs)}"
 init, tools, call = msgs
-assert init["result"]["serverInfo"]["name"] == "tach", init
+assert init["result"]["serverInfo"]["name"] == "perdure", init
 assert init["result"]["protocolVersion"] == "2025-06-18", "server should echo the client protocol version"
 names = [t["name"] for t in tools["result"]["tools"]]
-for must in ["tach_guard_begin", "tach_guard_verify", "tach_guard_finalize", "tach_goal_receipts"]:
+for must in ["perdure_guard_begin", "perdure_guard_verify", "perdure_guard_finalize", "perdure_goal_receipts"]:
     assert must in names, f"missing tool {must}"
 assert not any(("shell" in n or "exec" in n or "write" in n) for n in names), "no raw-execution tool may be exposed"
 body = json.loads(call["result"]["content"][0]["text"])

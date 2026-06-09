@@ -1,4 +1,4 @@
 /target
 **/*.rs.bk
-.tach/
+.perdure/
 .DS_Store

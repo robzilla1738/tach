@@ -266,7 +266,7 @@ fn one(d: &Diagnostic, ws: &Workspace) -> String {
 pub fn fix(o: &FixOutcome) -> String {
     let mut s = format!(
         "{} {}\n\n",
-        term::bold("Tach fix"),
+        term::bold("Perdure fix"),
         term::dim(&format!("· strategy {}", o.strategy))
     );
     for lap in &o.laps {
@@ -358,7 +358,7 @@ fn metrics_footer(o: &FixOutcome) -> String {
 pub fn race(o: &RaceOutcome) -> String {
     let mut s = format!(
         "{} {}\n\n",
-        term::bold("Tach race"),
+        term::bold("Perdure race"),
         term::dim(&format!("· {} branches, isolated", o.branches.len()))
     );
     for (i, b) in o.branches.iter().enumerate() {
@@ -424,9 +424,9 @@ pub fn tests(r: &TestReport) -> String {
     s
 }
 
-/// Render the effect surface of every function (`tach audit`).
+/// Render the effect surface of every function (`perdure audit`).
 pub fn audit(program: &Program) -> String {
-    let mut s = format!("{}\n\n", term::bold("Tach audit · effect surface"));
+    let mut s = format!("{}\n\n", term::bold("Perdure audit · effect surface"));
     let mut any = false;
     for u in &program.units {
         for it in &u.module.items {

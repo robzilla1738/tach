@@ -1,11 +1,11 @@
 # Repair corpus
 
-A suite of small, deliberately-broken Tach projects — one per repairable
+A suite of small, deliberately-broken Perdure projects — one per repairable
 diagnostic family — used to benchmark the agent loop over more than the single
-`tach new` demo. Run it with:
+`perdure new` demo. Run it with:
 
 ```
-tach bench --suite corpus
+perdure bench --suite corpus
 ```
 
 Each case is a self-contained project (`src/` + `tests/`) that starts red and

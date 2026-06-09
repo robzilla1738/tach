@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 /// A runtime value. Records use a `BTreeMap` so iteration order is deterministic
-/// — Tach's whole story rests on reproducible runs, so we never leave ordering
+/// — Perdure's whole story rests on reproducible runs, so we never leave ordering
 /// to chance.
 #[derive(Clone, Debug)]
 pub enum Value {

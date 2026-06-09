@@ -1,7 +1,7 @@
-//! Versioned JSON Schemas for every machine-facing output Tach produces.
+//! Versioned JSON Schemas for every machine-facing output Perdure produces.
 //!
 //! These are the contract an integrator codes against. They are embedded into the
-//! binary at build time (so `tach schema <name>` works hermetically, with no
+//! binary at build time (so `perdure schema <name>` works hermetically, with no
 //! files to ship) and are kept honest by a golden test that parses each one and
 //! checks that a representative output validates against the Rust types that are
 //! the actual source of truth.
@@ -13,11 +13,11 @@ pub struct Schema {
     pub json: &'static str,
 }
 
-/// Every schema Tach publishes, in stable order.
+/// Every schema Perdure publishes, in stable order.
 pub const SCHEMAS: &[Schema] = &[
     Schema {
         name: "diagnostic",
-        title: "compiler diagnostic (`tach check --json`)",
+        title: "compiler diagnostic (`perdure check --json`)",
         json: include_str!("../schemas/diagnostic.schema.json"),
     },
     Schema {
@@ -52,52 +52,52 @@ pub const SCHEMAS: &[Schema] = &[
     },
     Schema {
         name: "bench",
-        title: "suite bench output (`tach bench --suite --json`)",
+        title: "suite bench output (`perdure bench --suite --json`)",
         json: include_str!("../schemas/bench.schema.json"),
     },
     Schema {
         name: "test",
-        title: "test report (`tach test --json`)",
+        title: "test report (`perdure test --json`)",
         json: include_str!("../schemas/test.schema.json"),
     },
     Schema {
         name: "guard-context",
-        title: "guard operating contract (`tach guard context --json`)",
+        title: "guard operating contract (`perdure guard context --json`)",
         json: include_str!("../schemas/guard-context.schema.json"),
     },
     Schema {
         name: "guard-status",
-        title: "guard session status (`tach guard status --json`)",
+        title: "guard session status (`perdure guard status --json`)",
         json: include_str!("../schemas/guard-status.schema.json"),
     },
     Schema {
         name: "guard-diff",
-        title: "guard scope-classified diff (`tach guard diff --json`)",
+        title: "guard scope-classified diff (`perdure guard diff --json`)",
         json: include_str!("../schemas/guard-diff.schema.json"),
     },
     Schema {
         name: "guard-verify",
-        title: "guard verify result (`tach guard verify --json`)",
+        title: "guard verify result (`perdure guard verify --json`)",
         json: include_str!("../schemas/guard-verify.schema.json"),
     },
     Schema {
         name: "guard-commit",
-        title: "guard commit/abort outcome (`tach guard commit --json`)",
+        title: "guard commit/abort outcome (`perdure guard commit --json`)",
         json: include_str!("../schemas/guard-commit.schema.json"),
     },
     Schema {
         name: "guard-audit",
-        title: "guard ledger-integrity audit (`tach guard audit --json`)",
+        title: "guard ledger-integrity audit (`perdure guard audit --json`)",
         json: include_str!("../schemas/guard-audit.schema.json"),
     },
     Schema {
         name: "guard-next",
-        title: "guard next required action (`tach guard next --json`)",
+        title: "guard next required action (`perdure guard next --json`)",
         json: include_str!("../schemas/guard-next.schema.json"),
     },
     Schema {
         name: "agent-context",
-        title: "generic agent context (`tach guard context --for-agent generic --json`)",
+        title: "generic agent context (`perdure guard context --for-agent generic --json`)",
         json: include_str!("../schemas/agent-context.schema.json"),
     },
 ];
@@ -199,8 +199,8 @@ mod tests {
                 allowed_commands: vec!["cargo test".into()],
                 forbidden: json!({ "out_of_scope_writes": "rejected at the gate" }),
                 current_failure: None,
-                next_required_action: "edit files in scope, then run `tach guard verify`".into(),
-                verification_condition: "`tach guard status --json` reports verified=true".into(),
+                next_required_action: "edit files in scope, then run `perdure guard verify`".into(),
+                verification_condition: "`perdure guard status --json` reports verified=true".into(),
                 done_condition: "verified=true and phase=committed".into(),
                 verified: false,
             },
@@ -249,7 +249,7 @@ mod tests {
                     },
                 }),
                 next_action: "fix_scope_violation".into(),
-                recommended_command: "tach guard diff --json".into(),
+                recommended_command: "perdure guard diff --json".into(),
             },
         );
 
@@ -263,9 +263,9 @@ mod tests {
                 allowed_files: vec!["src/**".into()],
                 allowed_commands: vec!["cargo test".into()],
                 scope_violations: vec![],
-                done_condition: "`tach guard status --json` reports verified=true".into(),
-                recommended_command: "tach guard verify".into(),
-                instructions: vec!["Run `tach guard verify`.".into()],
+                done_condition: "`perdure guard status --json` reports verified=true".into(),
+                recommended_command: "perdure guard verify".into(),
+                instructions: vec!["Run `perdure guard verify`.".into()],
             },
         );
 
@@ -300,10 +300,10 @@ mod tests {
                     stderr_artifact: Some("artifacts/k.stderr".into()),
                 }],
                 current_failure: None,
-                done_condition: "`tach guard status --json` reports verified=true".into(),
+                done_condition: "`perdure guard status --json` reports verified=true".into(),
                 next_action: "run_verify".into(),
-                recommended_command: "tach guard verify".into(),
-                instructions: vec!["Run `tach guard verify`.".into()],
+                recommended_command: "perdure guard verify".into(),
+                instructions: vec!["Run `perdure guard verify`.".into()],
                 verified: false,
             },
         );

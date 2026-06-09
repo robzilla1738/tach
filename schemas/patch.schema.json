@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://tach.dev/schemas/patch.schema.json",
-  "title": "Tach Patch",
+  "$id": "https://perdure.dev/schemas/patch.schema.json",
+  "title": "Perdure Patch",
   "description": "A typed patch: a scoped, named, justified bundle of edits with proof obligations the verification pipeline discharges before the patch is allowed to touch the repo. This is the shape a fixture coder authors.",
   "type": "object",
   "required": ["name", "reason", "touches", "edits", "prove"],
@@ -38,7 +38,7 @@
     "prove": {
       "type": "array",
       "items": { "type": "string" },
-      "description": "Human-facing proof obligations, e.g. `tach check`, `tach test`."
+      "description": "Human-facing proof obligations, e.g. `perdure check`, `perdure test`."
     }
   }
 }

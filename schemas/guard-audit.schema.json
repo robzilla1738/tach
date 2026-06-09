@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://tach.dev/schemas/guard-audit.schema.json",
-  "title": "Tach Guard Audit",
-  "description": "Ledger-integrity report (`tach guard audit --json`). Re-derives a guard run's durable history from outside the agent: the SHA-256 event hash chain, each receipt's anchoring to a chain event and untampered input_hash, and the consistency of the recorded verified bit with what the receipts support. This is detection, not prevention — with no sandbox an agent with .tach write access can corrupt its own ledger, but it cannot forge a self-consistent one without inverting SHA-256.",
+  "$id": "https://perdure.dev/schemas/guard-audit.schema.json",
+  "title": "Perdure Guard Audit",
+  "description": "Ledger-integrity report (`perdure guard audit --json`). Re-derives a guard run's durable history from outside the agent: the SHA-256 event hash chain, each receipt's anchoring to a chain event and untampered input_hash, and the consistency of the recorded verified bit with what the receipts support. This is detection, not prevention — with no sandbox an agent with .perdure write access can corrupt its own ledger, but it cannot forge a self-consistent one without inverting SHA-256.",
   "type": "object",
   "required": ["run_id", "ok", "events_total", "chain_ok", "chain_detail", "receipts_total", "receipts_ok", "receipts_detail", "state_consistent", "state_detail"],
   "additionalProperties": false,

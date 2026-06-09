@@ -1,6 +1,6 @@
 //! The Action Layer: fake long-horizon *business* goals.
 //!
-//! The repair runtime (`runtime::drive`) drives a `.tach` source workspace from red
+//! The repair runtime (`runtime::drive`) drives a `.pdr` source workspace from red
 //! to green by proposing typed patches. A business goal is a different shape: it has
 //! no source to fix — it runs a fixed **action plan**, where each step calls a tool,
 //! some steps pause for human approval, and effectful steps must produce a durable
@@ -9,9 +9,9 @@
 //! Two things live here:
 //!   * the plan model (`PlannedAction`/`ActionPlan`) and the offline, deterministic
 //!     **fake tools** (`invoke_fake_tool`) — no network, no clock, no randomness; and
-//!   * a small built-in **catalog** (`builtin_action_goal`) so `tach goal run
+//!   * a small built-in **catalog** (`builtin_action_goal`) so `perdure goal run
 //!     ResolveDuplicateCharge` works turn-key. The goal's authority/budget/`require`
-//!     is written in the real Tach language (parsed into a `GoalSpec`); only the plan
+//!     is written in the real Perdure language (parsed into a `GoalSpec`); only the plan
 //!     itself is Rust data, since the workflow syntax for expressing plans in-language
 //!     is deliberately not built yet.
 //!
@@ -36,7 +36,7 @@ pub struct PlannedAction {
     pub tool: String,
     /// Deterministic input to the tool.
     pub input: Value,
-    /// Pauses the run for a human `tach goal approve`/`deny` before executing.
+    /// Pauses the run for a human `perdure goal approve`/`deny` before executing.
     #[serde(default)]
     pub requires_approval: bool,
     /// Performs a side effect → must produce a receipt and is idempotent on resume.
@@ -128,7 +128,7 @@ pub fn invoke_fake_tool(tool: &str, input: &Value) -> Result<Value, String> {
 }
 
 /// Every fake tool the runtime can invoke. The single source of truth for "is this
-/// a real tool?" — used by `tach goal check` (E0434) and locked against drift from
+/// a real tool?" — used by `perdure goal check` (E0434) and locked against drift from
 /// `invoke_fake_tool`'s arms by a round-trip test. Keep in sync with the match above.
 pub fn known_tools() -> &'static [&'static str] {
     &[
@@ -160,13 +160,13 @@ pub fn builtin_action_goal(name: &str) -> Option<(GoalSpec, ActionPlan)> {
     Some((spec, plan))
 }
 
-/// The names of every built-in action goal, in stable order (for `tach goal`).
+/// The names of every built-in action goal, in stable order (for `perdure goal`).
 pub fn builtin_action_goal_names() -> &'static [&'static str] {
     &["ResolveDuplicateCharge", "ShipHotfixPR"]
 }
 
 fn parse_builtin_goal(name: &str, src: &str) -> Option<GoalSpec> {
-    let (prog, diags) = Program::parse_sources(vec![SourceFile::new("builtin.tach", src)]);
+    let (prog, diags) = Program::parse_sources(vec![SourceFile::new("builtin.pdr", src)]);
     debug_assert!(
         diags.iter().all(|d| !d.is_error()),
         "built-in goal `{name}` must parse cleanly: {diags:?}"
@@ -305,7 +305,7 @@ mod tests {
     }
 
     /// Every tool a built-in plan goal grants must be a known tool — otherwise a
-    /// shipped goal could never run and `tach goal check` would flag it.
+    /// shipped goal could never run and `perdure goal check` would flag it.
     #[test]
     fn builtin_plan_goals_grant_only_known_tools() {
         for name in crate::plan::builtin_plan_goal_names() {

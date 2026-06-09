@@ -94,9 +94,30 @@ pub fn write_back(
 
 /// Scaffold a new project at `root/name`. By default this is the deliberately
 /// broken auth demo (so `tach fix` has something to do); `--clean` produces a
-/// minimal green project instead.
-pub fn scaffold(parent: &Path, name: &str, clean: bool) -> io::Result<PathBuf> {
+/// minimal green project, and `plan_template` (e.g. `chargebacks`) produces a
+/// workspace-authored plan goal ready to `tach goal run`.
+pub fn scaffold(
+    parent: &Path,
+    name: &str,
+    clean: bool,
+    plan_template: Option<&str>,
+) -> io::Result<PathBuf> {
     let root = parent.join(name);
+    if let Some(tmpl) = plan_template {
+        let src = match tmpl {
+            "chargebacks" => PLAN_DEMO_CHARGEBACKS,
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("unknown goal template `{other}` (try `chargebacks`)"),
+                ))
+            }
+        };
+        fs::create_dir_all(&root)?;
+        fs::write(root.join("Tach.toml"), manifest(name))?;
+        fs::write(root.join("goal.tach"), src)?;
+        return Ok(root);
+    }
     fs::create_dir_all(root.join("src"))?;
     fs::create_dir_all(root.join("tests"))?;
     fs::write(root.join("Tach.toml"), manifest(name))?;
@@ -185,6 +206,56 @@ pub const DEMO_GOAL: &str = r#"goal FixFailingTests -> Success {
   require {
     tests.pass
     no_new_effects
+  }
+}
+"#;
+
+/// A workspace-authored plan goal (`tach new <name> --goal chargebacks`). It is a
+/// durable workflow, not a repair run: it lists a customer's disputed charges,
+/// loops over them, and refunds the duplicates behind a per-charge approval gate —
+/// exactly the shape of the built-in `ReconcileChargebacks`, but living in the
+/// user's own file under a distinct name, so it runs entirely off the binary's
+/// catalog and resumes/replays from the source snapshot. Written canonically so
+/// `tach fmt` is a no-op.
+pub const PLAN_DEMO_CHARGEBACKS: &str = r#"goal ReconcileLocalDemo -> Success {
+  budget {
+    steps: 60
+  }
+  allow {
+    fake.stripe.list_disputes
+    fake.stripe.refund
+    fake.email.send
+    fake.zendesk.comment
+  }
+  require {
+    refunds.receipted
+  }
+  plan {
+    let disputes = call fake.stripe.list_disputes {
+      customer: "cus_42"
+    }
+    for charge in disputes.charges {
+      if charge.is_duplicate {
+        approve "refund the duplicate charge" {
+          let refund = call fake.stripe.refund {
+            charge_id: charge.charge_id
+            amount_cents: charge.amount_cents
+            reason: "duplicate"
+          }
+          call fake.email.send {
+            to: "billing@acme.test"
+            template: "refund_issued"
+            charge_id: charge.charge_id
+          }
+        }
+      } else {
+        call fake.zendesk.comment {
+          ticket_id: "zd_dispute"
+          body: "Reviewed: not a duplicate, no refund."
+          public: false
+        }
+      }
+    }
   }
 }
 "#;

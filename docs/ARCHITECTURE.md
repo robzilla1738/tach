@@ -45,10 +45,10 @@ byte-for-byte.
 | `agent` | the `fix` loop, the optional `Coder` seam (default off), speculative `race`, the suite benchmark, the agent-era `Metrics`, and the shared repair leaves (`collect_problems`, `pick_candidate`, `build_patch`) the goal runtime reuses |
 | `goal` | the resolved `GoalSpec` (budget, authority, success conditions), decoupled from spans so it serializes into the store |
 | `event` | the `tach.event.v1` envelope and the append-only JSONL `EventLog` |
-| `store` | the durable goal store: `goal.json`, `state.json`, `events.jsonl`, `checkpoints/`, `approvals/`, `receipts/`, the deterministic source `fingerprint`, canonical idempotency/approval ids, **atomic writes** (temp-file + rename), and unique run-id allocation |
-| `runtime` | the durable executor — `step_once`/`drive` (the repair loop), the action layer's `drive_actions` (a fixed plan with approval gates and receipts), and the plan language's `drive_plan` (durable re-execution of a `plan` block); `resume_run`/`replay_run` dispatch on `GoalRecord.kind` |
+| `store` | the durable goal store: `goal.json`, `state.json`, `events.jsonl`, `checkpoints/`, `approvals/`, `receipts/` (each receipt self-describing — run/step/effect/input-hash/approval/recording-event), the deterministic source `fingerprint`, canonical idempotency/approval ids, **atomic writes** (temp-file + rename), and unique run-id allocation |
+| `runtime` | the durable executor — `step_once`/`drive` (the repair loop), the action layer's `drive_actions` (a fixed plan with approval gates and receipts), and the plan language's `drive_plan` (durable re-execution of a `plan` block); `resolve_plan` re-parses a user goal's frozen source snapshot on resume (catalog for built-ins); `resume_run`/`replay_run` dispatch on `GoalRecord.kind` |
 | `action` | the linear action layer: the `ActionPlan` model, the offline deterministic **fake tools** (`invoke_fake_tool`), and the built-in goal catalog (`ResolveDuplicateCharge`, `ShipHotfixPR`) |
-| `plan` | the **plan language**: the pure expression evaluator (AST `Expr` → JSON value) and the built-in plan-goal catalog (`ReconcileChargebacks`, `RetryFlakyDeploy`); the durable interpreter lives in `runtime` |
+| `plan` | the **plan language**: the pure expression evaluator (AST `Expr` → JSON value) and the built-in plan-goal catalog (`ReconcileChargebacks`, `RetryFlakyDeploy`); user-authored plan goals run the same interpreter from a workspace `plan` block. The durable interpreter and `check::check_plan_goal` (the `tach goal check` linter) live in `runtime`/`check` |
 | `fmt` | the one canonical formatter — a precedence-aware, idempotent AST pretty-printer (goals included) |
 | `schema` | versioned JSON Schemas for every machine output, embedded and served by `tach schema` |
 | `trace` | persist/load `fix`/`race` runs to `.tach/trace.json` (the per-goal history lives in the store) |
@@ -284,9 +284,26 @@ semantics, key formulas, and tools, so the two can't disagree on what they decid
 
 Budget bills tool calls reached per walk, so a `for`/`while` that calls tools is bounded by it; a
 generous `PLAN_LOOP_LIMIT` separately catches a pathological call-free loop. Approval decisions
-are final once made — the `approve`/`deny` command refuses to change a decided gate. And the plan
-is re-derived from the catalog by goal name on every resume, the same way a replay re-runs the
-repair leaves: it is part of the binary's identity, not something the store has to persist.
+are final once made — the `approve`/`deny` command refuses to change a decided gate.
+
+**Where the plan comes from on resume (`resolve_plan`).** A built-in plan goal carries no source
+snapshot (`base_files` is empty); its plan is re-derived from the catalog by goal name on every
+resume, the same way a replay re-runs the repair leaves — it is part of the binary's identity. A
+**user-authored** plan goal is different: when the run starts, `start_plan_run` snapshots the
+authoring workspace into `GoalRecord.base_files` (the same map repair goals snapshot), and
+`resolve_plan` re-parses that **frozen snapshot** on resume/replay — never the live working tree.
+Re-parsing the same source with the same binary is deterministic, so the walk-order ordinals and
+idempotency keys re-derive identically and exactly-once still holds; and because the live file is
+never read, editing it after a run starts cannot change a run already in flight. The plan checker
+(`check::check_plan_goal`, surfaced as `tach goal check`) validates a user plan — ungranted/unknown
+tools, unbound variables, unevaluable expressions, progress-free loops — before any of this runs.
+
+**Audit-grade receipts.** Beyond the exactly-once core (`idempotency_key` + `output`), each receipt
+records the `run_id` and `step` it committed at, the `effect`, an `input_hash`, the `approval_id`
+that authorized it (for a gated effect), and the `created_event_id` of the history event that
+recorded it — so a receipt is self-describing for export. These fields are `#[serde(default)]` and
+invisible to replay (which compares only `idempotency_key → output`), so they change nothing about
+reproduction.
 
 ## Why an interpreter (for now)
 

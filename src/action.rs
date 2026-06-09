@@ -127,6 +127,26 @@ pub fn invoke_fake_tool(tool: &str, input: &Value) -> Result<Value, String> {
     }
 }
 
+/// Every fake tool the runtime can invoke. The single source of truth for "is this
+/// a real tool?" — used by `tach goal check` (E0434) and locked against drift from
+/// `invoke_fake_tool`'s arms by a round-trip test. Keep in sync with the match above.
+pub fn known_tools() -> &'static [&'static str] {
+    &[
+        "fake.stripe.find_duplicate",
+        "fake.stripe.refund",
+        "fake.email.send",
+        "fake.github.create_pr",
+        "fake.zendesk.comment",
+        "fake.stripe.list_disputes",
+        "fake.ci.deploy",
+    ]
+}
+
+/// Whether `tool` is a tool the runtime knows how to invoke.
+pub fn is_known_tool(tool: &str) -> bool {
+    known_tools().contains(&tool)
+}
+
 /// The built-in action goals, by name. Returns the resolved `GoalSpec` (parsed from
 /// the in-language goal declaration, so authority/budget/`require` are real) plus the
 /// Rust action plan.
@@ -257,13 +277,7 @@ mod tests {
 
     #[test]
     fn fake_tools_are_deterministic() {
-        for tool in [
-            "fake.stripe.find_duplicate",
-            "fake.stripe.refund",
-            "fake.email.send",
-            "fake.github.create_pr",
-            "fake.zendesk.comment",
-        ] {
+        for tool in known_tools() {
             let input = json!({ "a": 1, "b": "x", "charge_id": "ch_1", "repo": "acme/api", "ticket_id": "zd_1", "to": "c@x" });
             let a = invoke_fake_tool(tool, &input).expect("tool ok");
             let b = invoke_fake_tool(tool, &input).expect("tool ok");
@@ -274,6 +288,32 @@ mod tests {
     #[test]
     fn unknown_tool_is_an_error() {
         assert!(invoke_fake_tool("fake.unknown", &json!({})).is_err());
+        assert!(!is_known_tool("fake.unknown"));
+    }
+
+    /// `known_tools()` must not drift from `invoke_fake_tool`'s arms: every name it
+    /// lists has to actually be invokable. This is the lock that the existing
+    /// determinism test (which once hand-listed only 5 of 7) failed to provide.
+    #[test]
+    fn known_tools_are_all_invokable() {
+        for tool in known_tools() {
+            assert!(
+                invoke_fake_tool(tool, &json!({})).is_ok(),
+                "`{tool}` is in known_tools() but invoke_fake_tool rejects it"
+            );
+        }
+    }
+
+    /// Every tool a built-in plan goal grants must be a known tool — otherwise a
+    /// shipped goal could never run and `tach goal check` would flag it.
+    #[test]
+    fn builtin_plan_goals_grant_only_known_tools() {
+        for name in crate::plan::builtin_plan_goal_names() {
+            let (spec, _) = crate::plan::builtin_plan_goal(name).expect("catalog entry");
+            for t in &spec.allow.tools {
+                assert!(is_known_tool(t), "{name}: grants unknown tool `{t}`");
+            }
+        }
     }
 
     #[test]

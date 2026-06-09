@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://tach.dev/schemas/receipt.schema.json",
   "title": "Tach Receipt",
-  "description": "Durable proof that an effectful action ran (receipts/<id>.json). Keyed by an idempotency key derived from (run_id, action_id, tool, input); re-entering the same action on resume finds this receipt and skips the tool call, so a side effect happens exactly once.",
+  "description": "Durable proof that an effectful action ran (receipts/<id>.json). Keyed by an idempotency key derived from (run_id, action_id, tool, input); re-entering the same action on resume finds this receipt and skips the tool call, so a side effect happens exactly once. Beyond that core, a receipt is self-describing for audit: it records the run/step it committed at, the effect, an input hash, the approval that authorized it, and the history event that recorded it. The audit fields are optional so receipts written before they existed still validate.",
   "type": "object",
   "required": ["receipt_id", "idempotency_key", "action_id", "tool", "input", "output"],
   "additionalProperties": false,
@@ -12,6 +12,12 @@
     "action_id": { "type": "string" },
     "tool": { "type": "string", "description": "The fake tool invoked, e.g. fake.stripe.refund." },
     "input": { "description": "The exact input passed to the tool." },
-    "output": { "description": "The tool's recorded result — the proof of the effect." }
+    "output": { "description": "The tool's recorded result — the proof of the effect." },
+    "run_id": { "type": "string", "description": "The run this effect belongs to." },
+    "step": { "type": "integer", "minimum": 0, "description": "The step (cumulative durable effect count) this receipt committed at." },
+    "effect": { "type": "string", "description": "The effect identity (currently the tool name)." },
+    "input_hash": { "type": "string", "description": "Content hash of the canonical input, e.g. ih_…." },
+    "approval_id": { "type": "string", "description": "The approval gate that authorized this effect, if it ran inside a granted approve block." },
+    "created_event_id": { "type": "string", "description": "The receipt.created event that recorded this receipt, e.g. evt_000012." }
   }
 }

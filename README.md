@@ -251,8 +251,22 @@ $ tach goal replay <id>
 `RetryFlakyDeploy` is a `while` loop: it retries a flaky deploy until it works (it fails on
 attempts 1–2 and succeeds on the 3rd, deterministically), then announces it behind an approval
 gate. Resume a crashed retry loop and it re-derives the attempt count without re-running any
-deploy that already has a receipt. Both goals are built-in and offline; see
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the interpreter and its exactly-once invariant.
+deploy that already has a receipt. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the
+interpreter and its exactly-once invariant.
+
+### Write your own
+
+Plan goals aren't limited to the built-ins — write one in your own project and run it the same
+way. `tach new demo --goal chargebacks` scaffolds a `goal.tach` with a `ReconcileLocalDemo` plan
+goal you own; `tach goal check ReconcileLocalDemo` validates the plan before you run it (ungranted
+tools, unknown tools, unbound variables, unsupported expressions, and loops that can't make
+progress all fail here, not at runtime).
+
+When a run starts, Tach snapshots the goal source into the run record. Resume and replay re-parse
+that **frozen snapshot**, never the live file — so editing `goal.tach` after a run begins cannot
+change a run already in flight. Each receipt is self-describing for audit: it records the run and
+step it committed at, the effect, a hash of the input, the approval that authorized it, and the
+history event that recorded it (`tach goal receipt <id> <rcpt>`).
 
 ## Why this is different
 
@@ -384,7 +398,7 @@ The result is a single static binary. Put `target/release/tach` on your `PATH`.
 
 | Command | What it does |
 | --- | --- |
-| `tach new <name>` | Scaffold a project (`--clean` for an empty one) |
+| `tach new <name>` | Scaffold a project (`--clean` for an empty one, `--goal chargebacks` for a plan-goal demo) |
 | `tach check [file]` | Type- and effect-check; `--json` for the machine view |
 | `tach run [file]` | Run the project's `main` |
 | `tach test [filter]` | Run tests (blocked while the project has errors) |
@@ -396,11 +410,17 @@ The result is a single static binary. Put `target/release/tach` on your `PATH`.
 | `tach bench` | Report agent-loop metrics (time-to-green, laps, …); `--suite <dir>` over a corpus |
 | `tach audit [file]` | Show every function's effect surface |
 | `tach goal run <name>` | Start a durable run (`--crash-after step:N`, `--strategy`, `--dry-run`) |
+| `tach goal check <name>` | Statically validate a goal's plan before running it (`--json`) |
 | `tach goal list` | List runs in the store |
 | `tach goal inspect <id>` | Show a run's state and event history (`--json`) |
 | `tach goal resume <id>` | Resume a crashed/incomplete run from its last checkpoint |
 | `tach goal replay <id>` | Re-run from base and prove it reproduces |
 | `tach goal cancel <id>` | Cancel a run |
+| `tach goal approvals <id>` | List a run's approval gates |
+| `tach goal approve <id> <apr>` | Grant a pending approval (`--note`) |
+| `tach goal deny <id> <apr>` | Deny a pending approval (`--reason`) |
+| `tach goal receipts <id>` | List a run's effect receipts |
+| `tach goal receipt <id> <rcpt>` | Show one receipt in full (`--json`) |
 | `tach doctor` | Hermetic health check of the toolchain + workspace |
 | `tach explain <code>` | Long-form explanation of a diagnostic code |
 | `tach schema [name]` | Print a versioned JSON schema for any machine output |
@@ -501,15 +521,16 @@ that a resume would read as "not yet done." There's a pluggable coder seam
 (`tach fix --coder fixture`) whose proposals still go through the exact same pipeline; `tach fmt`
 gives one canonical, idempotent style; `tach schema` publishes versioned JSON schemas for every
 machine output (including `approval` and `receipt`); and `tach doctor` / `tach explain` round out
-the toolchain. **84 passing tests** plus end-to-end checks (red→green, crash→resume→replay, the
-approval/refund/receipt demo, and the loop/approval/crash plan demo) and a schema-validation step in CI.
+the toolchain. **98 passing tests** plus end-to-end checks (red→green, crash→resume→replay, the
+approval/refund/receipt demo, the loop/approval/crash plan demo, and a user-authored plan goal
+that resumes off its source snapshot) and a schema-validation step in CI.
 
 **Near-term follow-ups (the roadmap the runtime is built for):** real tool integrations behind
-the fake-tool seam, user-authored plan goals loaded from a workspace (the interpreter already
-runs any parsed `plan` block; only the catalog is built-in today), typed memory lanes with a
-context-drift detector, an existing-repo `Tachfile` mode that wraps Bun/Cargo/Go test commands,
-MCP client/server, and a portable goal ABI. The event log, durable store, authority model, and
-the approval/receipt substrate are exactly what those phases hang off. Also: multi-file user
+the fake-tool seam, typed memory lanes with a context-drift detector, an existing-repo `Tachfile`
+mode that wraps Bun/Cargo/Go test commands, MCP client/server, and a portable goal ABI. The event
+log, durable store, authority model, and the approval/receipt substrate are exactly what those
+phases hang off. (User-authored plan goals — write a `plan` block in your own workspace and
+`run`/`check`/`resume`/`replay` it off a source snapshot — already work.) Also: multi-file user
 imports and comment-preserving formatting.
 
 **Deliberately scoped out:** native/LLVM codegen (today it interprets), a borrow checker,
@@ -522,14 +543,15 @@ model-free, so everything is fully reproducible offline.
 ## Testing
 
 ```console
-$ cargo test                 # unit + integration tests (84)
-$ bash scripts/e2e.sh        # new → check → fix → test demo, asserts green
-$ bash scripts/goal_e2e.sh   # goal run → crash → resume → replay, asserts no repeated work
-$ bash scripts/action_e2e.sh # approve → crash → resume → replay, asserts exactly one refund
-$ bash scripts/plan_e2e.sh   # plan loop → per-duplicate approval → mid-loop crash → exactly-once
+$ cargo test                   # unit + integration tests (98)
+$ bash scripts/e2e.sh          # new → check → fix → test demo, asserts green
+$ bash scripts/goal_e2e.sh     # goal run → crash → resume → replay, asserts no repeated work
+$ bash scripts/action_e2e.sh   # approve → crash → resume → replay, asserts exactly one refund
+$ bash scripts/plan_e2e.sh     # plan loop → per-duplicate approval → mid-loop crash → exactly-once
+$ bash scripts/user_plan_e2e.sh # scaffold → check → crash → snapshot-beats-live-edit → replay
 ```
 
-CI (`.github/workflows/ci.yml`) runs all four on every push, plus `tach fmt --check` and
+CI (`.github/workflows/ci.yml`) runs all five on every push, plus `tach fmt --check` and
 JSON-schema validation. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for notes aimed at
 automated/cloud agents.
 

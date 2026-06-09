@@ -504,21 +504,44 @@ pub fn receipts(items: &[crate::store::Receipt]) -> String {
             term::dim(&r.tool),
             term::dim(&r.action_id)
         ));
+        let gate = match &r.approval_id {
+            Some(a) => format!(" · approved by {a}"),
+            None => String::new(),
+        };
         out.push_str(&format!(
             "       {}\n",
-            term::dim(&format!("key {}", r.idempotency_key))
+            term::dim(&format!(
+                "step {} · key {}{}",
+                r.step, r.idempotency_key, gate
+            ))
         ));
     }
     out
 }
 
-/// A single receipt in full: its identity, the tool, and the input/output it proves.
+/// A single receipt in full: its identity, the effect it proves, and the audit
+/// trail (the run/step it committed at, the approval that authorized it, the input
+/// hash, and the history event that recorded it).
 pub fn receipt(r: &crate::store::Receipt) -> String {
     let mut out = format!("{} {}\n", term::bold_green("●"), term::bold(&r.receipt_id));
     let row = |k: &str, v: String| format!("  {:<14} {}\n", k, v);
     out.push_str(&row("tool", r.tool.clone()));
+    out.push_str(&row("effect", r.effect.clone()));
     out.push_str(&row("action", r.action_id.clone()));
+    if !r.run_id.is_empty() {
+        out.push_str(&row("run", r.run_id.clone()));
+    }
+    out.push_str(&row("step", r.step.to_string()));
     out.push_str(&row("idempotency", r.idempotency_key.clone()));
+    if !r.input_hash.is_empty() {
+        out.push_str(&row("input-hash", r.input_hash.clone()));
+    }
+    if let Some(a) = &r.approval_id {
+        out.push_str(&row("approval", a.clone()));
+    }
+    if !r.created_event_id.is_empty() {
+        out.push_str(&row("recorded-by", r.created_event_id.clone()));
+    }
     out.push_str(&row(
         "input",
         serde_json::to_string(&r.input).unwrap_or_default(),

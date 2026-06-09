@@ -245,6 +245,15 @@ plan goals ship built-in: `ReconcileChargebacks` (a `for` loop with a per-duplic
 and `RetryFlakyDeploy` (a `while` retry loop). See the architecture notes for the durable
 interpreter and its exactly-once invariant.
 
+You can also author a plan goal in your own workspace and run it the same way — nothing about it
+is built-in. `tach new demo --goal chargebacks` scaffolds a `goal.tach` you own, and
+`tach goal check <name>` validates the plan before you run it: it reports a `call` to a tool the
+`allow` block doesn't grant (`E0433`), an unknown tool (`E0434`, with a did-you-mean), a variable
+that is never bound (`E0435`), an expression form a plan can't evaluate (`E0436`), and a `while`
+loop that makes no tool call and so can only spin against the iteration limit (`E0437`). When a
+run starts, the goal's source is snapshotted into the run record; resume and replay re-parse that
+frozen snapshot, never the live file, so editing the source mid-run can't change a run in flight.
+
 ## Formatting
 
 There is **one formatter**. `tach fmt` renders any file to a single canonical style
@@ -270,6 +279,11 @@ formatting is a planned follow-up).
 | `E0461` | `unused_variable` (warning) | prefix the binding with `_` |
 | `E0431` | `unknown_require_condition` (warning) | name a condition the runtime can check |
 | `E0432` | `goal_unbounded` (warning) | add a `budget { steps: N }` block |
+| `E0433` | `tool_ungranted` | add the tool to the goal's `allow` block |
+| `E0434` | `unknown_tool` | rename to the nearest known tool (did-you-mean) |
+| `E0435` | `unbound_plan_var` | bind the variable (a `let` or a `for`) before using it |
+| `E0436` | `unsupported_plan_expr` | use a form a plan expression can evaluate |
+| `E0437` | `unbounded_plan_loop` (warning) | call a tool inside the loop so it makes progress |
 
 The mechanical code diagnostics each carry a `preferred_patch` so `tach fix` can apply them
 without guessing. The

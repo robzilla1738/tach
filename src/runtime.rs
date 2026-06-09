@@ -775,6 +775,9 @@ fn drive_actions(
                             json!({ "tool": action.tool, "action": action.id, "output": output }),
                         )?;
                         let rid = store::receipt_id(&key);
+                        // tool.called and tool.completed are already appended; the next
+                        // event will be receipt.created, so it gets the current seq.
+                        let created_event_id = format!("evt_{:06}", log.peek_seq());
                         let receipt = Receipt {
                             receipt_id: rid.clone(),
                             idempotency_key: key.clone(),
@@ -782,6 +785,15 @@ fn drive_actions(
                             tool: action.tool.clone(),
                             input: action.input.clone(),
                             output,
+                            run_id: run_id.clone(),
+                            // `receipts_created` is bumped just after this save.
+                            step: (state.receipts_created + 1) as u64,
+                            effect: action.tool.clone(),
+                            input_hash: store::input_hash(&action.input),
+                            approval_id: action
+                                .requires_approval
+                                .then(|| store::approval_id(&run_id, &action.id)),
+                            created_event_id,
                         };
                         store::save_receipt(repo, &run_id, &receipt)?; // <- COMMIT POINT
                         state.receipts_created += 1;
@@ -1057,6 +1069,11 @@ struct PlanCtx<'a> {
     baseline_receipts: u64,
     /// Loop-body iterations this walk (bounded by `PLAN_LOOP_LIMIT`).
     loop_iters: u64,
+    /// The approval gate currently authorizing execution, if the walk is inside a
+    /// granted `approve { … }` body. Recorded on the receipt of any gated effect so
+    /// a receipt names the approval that permitted it. Saved/restored across nested
+    /// gates.
+    current_gate_id: Option<String>,
     crash: Option<ActionCrash>,
 }
 
@@ -1230,6 +1247,11 @@ fn exec_call(ctx: &mut PlanCtx, c: &PlanCall) -> io::Result<CallOutcome> {
     match action::invoke_fake_tool(&c.tool, &input) {
         Ok(output) => {
             let rid = store::receipt_id(&key);
+            // The receipt is written BEFORE its events, so it can't read back the
+            // `receipt.created` id — precompute it. The events emitted just below are,
+            // in order, tool.called, tool.completed, receipt.created, so the third one
+            // (peek_seq + 2) is the receipt's recording event.
+            let created_event_id = format!("evt_{:06}", ctx.log.peek_seq() + 2);
             let receipt = Receipt {
                 receipt_id: rid.clone(),
                 idempotency_key: key.clone(),
@@ -1237,6 +1259,16 @@ fn exec_call(ctx: &mut PlanCtx, c: &PlanCall) -> io::Result<CallOutcome> {
                 tool: c.tool.clone(),
                 input: input.clone(),
                 output: output.clone(),
+                run_id: ctx.run_id.clone(),
+                // One receipt commits per durable side effect; this is the step it
+                // lands at. Computed explicitly because `ctx.save()` (which advances
+                // `state.step`) hasn't run yet and `committed_this_process` is bumped
+                // just after this.
+                step: ctx.baseline_receipts + ctx.committed_this_process + 1,
+                effect: c.tool.clone(),
+                input_hash: store::input_hash(&input),
+                approval_id: ctx.current_gate_id.clone(),
+                created_event_id,
             };
             store::save_receipt(ctx.repo, &ctx.run_id, &receipt)?; // <- COMMIT POINT
             ctx.committed_this_process += 1;
@@ -1320,8 +1352,15 @@ fn exec_approve(ctx: &mut PlanCtx, summary: &str, body: &[PlanStmt]) -> io::Resu
             )?;
             Ok(Flow::Denied(gate_id))
         }
-        // "granted" (or any other resolved status) → run the gated body.
-        _ => exec_stmts(ctx, body),
+        // "granted" (or any other resolved status) → run the gated body. The gate
+        // authorizes every effect inside it, so record it on those receipts;
+        // save/restore the prior gate to keep nested approvals correct.
+        _ => {
+            let prev = ctx.current_gate_id.replace(gate_id);
+            let flow = exec_stmts(ctx, body);
+            ctx.current_gate_id = prev;
+            flow
+        }
     }
 }
 
@@ -1349,6 +1388,7 @@ fn drive_plan(
         committed_this_process: 0,
         baseline_receipts: baseline,
         loop_iters: 0,
+        current_gate_id: None,
         crash,
     };
 
@@ -1428,20 +1468,23 @@ fn new_plan_state(run_id: &str, goal: &str) -> RunState {
     }
 }
 
-/// Start a brand-new plan run from a built-in goal's spec + plan body.
+/// Start a brand-new plan run. `base_files` is the source snapshot the run is
+/// pinned to: empty for a built-in goal (the plan is re-derived from the catalog),
+/// or the authoring workspace for a user-written plan goal (resume/replay re-parse
+/// this frozen snapshot, never the live tree). See [`resolve_plan`].
 pub fn start_plan_run(
     repo: &Path,
     spec: GoalSpec,
     plan_block: PlanBlock,
+    base_files: BTreeMap<String, String>,
     crash: Option<ActionCrash>,
 ) -> io::Result<RunResult> {
-    let base: BTreeMap<String, String> = BTreeMap::new();
-    let fingerprint = store::fingerprint(&spec.name, &base);
+    let fingerprint = store::fingerprint(&spec.name, &base_files);
     let run_id = store::allocate_run(repo, &fingerprint)?;
     let record = GoalRecord {
         spec: spec.clone(),
         strategy: "plan".into(),
-        base_files: base,
+        base_files,
         kind: "plan".into(),
     };
     store::save_goal(repo, &run_id, &record)?;
@@ -1462,24 +1505,57 @@ pub fn start_plan_run(
     drive_plan(repo, &spec, &plan_block, state, &mut log, crash)
 }
 
-/// Resume a plan run. There is nothing to "load" beyond the goal name: the plan
-/// is re-derived from the catalog and the walk recomputes everything from the
-/// receipts/ and approvals/ dirs. `state.json` is read only for the cosmetic
-/// `from_step` in the resume event.
+/// The plan a run executes, re-obtained for resume/replay. A user-authored plan
+/// goal snapshots its source into `base_files` at run start, so we re-parse that
+/// **frozen snapshot** — never the live working tree — which is what makes editing
+/// the source mid-run unable to change an in-flight run. A built-in goal has no
+/// snapshot (empty `base_files`); its plan is re-derived from the catalog, which is
+/// part of the binary's identity. Either way the result is identical to the plan
+/// the run started with, so the walk-order ordinals that key idempotency re-derive
+/// the same and exactly-once holds.
+fn resolve_plan(record: &GoalRecord) -> io::Result<PlanBlock> {
+    let name = &record.spec.name;
+    if !record.base_files.is_empty() {
+        let sources: Vec<crate::source::SourceFile> = record
+            .base_files
+            .iter()
+            .map(|(p, t)| crate::source::SourceFile::new(p.clone(), t.clone()))
+            .collect();
+        let (prog, _) = crate::program::Program::parse_sources(sources);
+        let decl = crate::goal::find_goal(&prog, name).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("goal `{name}` is not in the run's source snapshot"),
+            )
+        })?;
+        return decl.plan.clone().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("goal `{name}` in the run's snapshot has no plan block"),
+            )
+        });
+    }
+    plan::builtin_plan_goal(name)
+        .map(|(_, p)| p)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no built-in plan goal `{name}` to resolve"),
+            )
+        })
+}
+
+/// Resume a plan run. The plan is re-obtained via [`resolve_plan`] (snapshot or
+/// catalog) and the walk recomputes everything from the receipts/ and approvals/
+/// dirs. `state.json` is read only for the cosmetic `from_step` in the resume event.
 pub fn resume_plan_run(
     repo: &Path,
     run_id: &str,
     crash: Option<ActionCrash>,
 ) -> io::Result<RunResult> {
     let record = store::load_goal(repo, run_id)?;
-    let spec = record.spec;
-    let (_, plan_block) = plan::builtin_plan_goal(&spec.name).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("no built-in plan goal `{}` to resume", spec.name),
-        )
-    })?;
-    resume_plan_with(repo, run_id, spec, plan_block, crash)
+    let plan_block = resolve_plan(&record)?;
+    resume_plan_with(repo, run_id, record.spec, plan_block, crash)
 }
 
 /// Resume against an already-resolved spec + plan. The catalog path re-derives
@@ -1655,13 +1731,8 @@ fn replay_call(ctx: &mut ReplayCtx, c: &PlanCall) -> Result<Value, Flow> {
 
 pub fn replay_plan_run(repo: &Path, run_id: &str) -> io::Result<ReplayResult> {
     let record = store::load_goal(repo, run_id)?;
+    let plan_block = resolve_plan(&record)?;
     let spec = record.spec;
-    let (_, plan_block) = plan::builtin_plan_goal(&spec.name).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::NotFound,
-            format!("no built-in plan goal `{}` to replay", spec.name),
-        )
-    })?;
     let recorded = store::load_state(repo, run_id)?;
     let recorded_receipts: BTreeMap<String, Value> = store::list_receipts(repo, run_id)
         .into_iter()
@@ -2464,7 +2535,7 @@ mod tests {
     fn plan_pauses_at_the_first_gate_with_no_effect_yet() {
         let repo = TempRepo::new("plan_pause");
         let (spec, plan) = reconcile();
-        let r = start_plan_run(repo.path(), spec, plan, None).unwrap();
+        let r = start_plan_run(repo.path(), spec, plan, BTreeMap::new(), None).unwrap();
         assert!(r.paused, "pauses at the first duplicate's refund gate");
         assert_eq!(r.state.status, "awaiting_approval");
         let id = r.state.run_id.clone();
@@ -2480,7 +2551,7 @@ mod tests {
     fn plan_loop_refunds_each_duplicate_exactly_once() {
         let repo = TempRepo::new("plan_loop");
         let (spec, plan) = reconcile();
-        let r = start_plan_run(repo.path(), spec, plan, None).unwrap();
+        let r = start_plan_run(repo.path(), spec, plan, BTreeMap::new(), None).unwrap();
         let id = r.state.run_id.clone();
         // Two duplicates → two gates, each reached only after the prior resumes.
         approve_pending(repo.path(), &id);
@@ -2508,7 +2579,7 @@ mod tests {
         // loop, then resume — the refund must NOT happen a second time.
         let repo = TempRepo::new("plan_crash_loop");
         let (spec, plan) = reconcile();
-        let r = start_plan_run(repo.path(), spec, plan, None).unwrap();
+        let r = start_plan_run(repo.path(), spec, plan, BTreeMap::new(), None).unwrap();
         let id = r.state.run_id.clone();
         approve_pending(repo.path(), &id);
         // Crash after the 1st new receipt of this resume — that is the refund.
@@ -2536,7 +2607,7 @@ mod tests {
     fn plan_while_loop_converges_and_resume_does_not_redeploy() {
         let repo = TempRepo::new("plan_while");
         let (spec, plan) = retry();
-        let r = start_plan_run(repo.path(), spec, plan, None).unwrap();
+        let r = start_plan_run(repo.path(), spec, plan, BTreeMap::new(), None).unwrap();
         let id = r.state.run_id.clone();
         // The while loop runs deploy on attempts 1,2,3 (succeeds on 3), then
         // pauses at the announce gate.
@@ -2563,8 +2634,14 @@ mod tests {
         let repo = TempRepo::new("plan_while_crash");
         let (spec, plan) = retry();
         // Crash right after the 2nd deploy commit of the very first walk.
-        let r =
-            start_plan_run(repo.path(), spec, plan, Some(ActionCrash::AfterReceipt(2))).unwrap();
+        let r = start_plan_run(
+            repo.path(),
+            spec,
+            plan,
+            BTreeMap::new(),
+            Some(ActionCrash::AfterReceipt(2)),
+        )
+        .unwrap();
         assert!(r.crashed);
         let id = r.state.run_id.clone();
         assert_eq!(receipts_by_tool(repo.path(), &id, "fake.ci.deploy"), 2);
@@ -2586,7 +2663,7 @@ mod tests {
     fn plan_conditional_else_branch_runs_for_non_duplicates() {
         let repo = TempRepo::new("plan_cond");
         let (spec, plan) = reconcile();
-        let r = start_plan_run(repo.path(), spec, plan, None).unwrap();
+        let r = start_plan_run(repo.path(), spec, plan, BTreeMap::new(), None).unwrap();
         let id = r.state.run_id.clone();
         approve_pending(repo.path(), &id);
         resume_plan_run(repo.path(), &id, None).unwrap();
@@ -2605,7 +2682,7 @@ mod tests {
     fn plan_deny_gate_fails_with_no_side_effect() {
         let repo = TempRepo::new("plan_deny");
         let (spec, plan) = reconcile();
-        let r = start_plan_run(repo.path(), spec, plan, None).unwrap();
+        let r = start_plan_run(repo.path(), spec, plan, BTreeMap::new(), None).unwrap();
         let id = r.state.run_id.clone();
         // Deny the first refund gate (gate0).
         deny(repo.path(), &id, "gate0");
@@ -2622,7 +2699,7 @@ mod tests {
     fn plan_resume_while_pending_is_a_noop() {
         let repo = TempRepo::new("plan_pending_noop");
         let (spec, plan) = reconcile();
-        let r = start_plan_run(repo.path(), spec, plan, None).unwrap();
+        let r = start_plan_run(repo.path(), spec, plan, BTreeMap::new(), None).unwrap();
         let id = r.state.run_id.clone();
         let approvals_before = store::list_approvals(repo.path(), &id).len();
         let receipts_before = store::list_receipts(repo.path(), &id).len();
@@ -2652,7 +2729,7 @@ mod tests {
 "#;
         let repo = TempRepo::new("plan_authority");
         let (spec, plan) = parse_plan_goal(src, "Sneaky");
-        let r = start_plan_run(repo.path(), spec, plan, None).unwrap();
+        let r = start_plan_run(repo.path(), spec, plan, BTreeMap::new(), None).unwrap();
         assert_eq!(r.state.status, "failed");
         assert_eq!(store::list_receipts(repo.path(), &r.state.run_id).len(), 0);
         assert_eq!(
@@ -2680,7 +2757,7 @@ mod tests {
 "#;
         let repo = TempRepo::new("plan_budget");
         let (spec, plan) = parse_plan_goal(src, "Greedy");
-        let r = start_plan_run(repo.path(), spec, plan, None).unwrap();
+        let r = start_plan_run(repo.path(), spec, plan, BTreeMap::new(), None).unwrap();
         assert_eq!(r.state.status, "budget_exhausted");
         // Billed against tool calls reached: at most the 2 it was allowed.
         assert!(store::list_receipts(repo.path(), &r.state.run_id).len() <= 2);
@@ -2708,7 +2785,14 @@ mod tests {
 "#;
         let repo = TempRepo::new("plan_nested");
         let (spec, plan) = parse_plan_goal(src, "Nested");
-        let r = start_plan_run(repo.path(), spec.clone(), plan.clone(), None).unwrap();
+        let r = start_plan_run(
+            repo.path(),
+            spec.clone(),
+            plan.clone(),
+            BTreeMap::new(),
+            None,
+        )
+        .unwrap();
         assert!(r.paused, "pauses at the outer gate first");
         let id = r.state.run_id.clone();
         // Granting the outer gate reveals the inner gate on the next resume.
@@ -2733,7 +2817,7 @@ mod tests {
         // to the same status + receipt set, even though their event logs differ.
         let straight = TempRepo::new("plan_replay_straight");
         let (s1, p1) = reconcile();
-        let r1 = start_plan_run(straight.path(), s1, p1, None).unwrap();
+        let r1 = start_plan_run(straight.path(), s1, p1, BTreeMap::new(), None).unwrap();
         let id1 = r1.state.run_id.clone();
         approve_pending(straight.path(), &id1);
         resume_plan_run(straight.path(), &id1, None).unwrap();
@@ -2742,7 +2826,7 @@ mod tests {
 
         let crashed = TempRepo::new("plan_replay_crashed");
         let (s2, p2) = reconcile();
-        let r2 = start_plan_run(crashed.path(), s2, p2, None).unwrap();
+        let r2 = start_plan_run(crashed.path(), s2, p2, BTreeMap::new(), None).unwrap();
         let id2 = r2.state.run_id.clone();
         approve_pending(crashed.path(), &id2);
         resume_plan_run(crashed.path(), &id2, Some(ActionCrash::AfterReceipt(1))).unwrap();
@@ -2773,11 +2857,200 @@ mod tests {
     fn plan_run_writes_only_under_dot_tach() {
         let repo = TempRepo::new("plan_iso");
         let (spec, plan) = reconcile();
-        start_plan_run(repo.path(), spec, plan, None).unwrap();
+        start_plan_run(repo.path(), spec, plan, BTreeMap::new(), None).unwrap();
         let entries: Vec<String> = std::fs::read_dir(repo.path())
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(entries, vec![".tach".to_string()], "no stray files at root");
+    }
+
+    // ----- user-authored (workspace) plan goals -----
+
+    /// A plan goal whose NAME is deliberately *not* in the built-in catalog, so the
+    /// only way run/resume/replay can resolve it is by re-parsing the source
+    /// snapshot stored in the run record.
+    const WORKSPACE_PLAN_SRC: &str = r#"goal LocalReconcile -> Success {
+  budget { steps: 60 }
+  allow {
+    fake.stripe.list_disputes
+    fake.stripe.refund
+    fake.email.send
+    fake.zendesk.comment
+  }
+  require { refunds.receipted }
+  plan {
+    let disputes = call fake.stripe.list_disputes { customer: "cus_77" }
+    for charge in disputes.charges {
+      if charge.is_duplicate {
+        approve "refund the duplicate charge" {
+          let refund = call fake.stripe.refund {
+            charge_id: charge.charge_id
+            amount_cents: charge.amount_cents
+            reason: "duplicate"
+          }
+          call fake.email.send {
+            to: "billing@acme.test"
+            template: "refund_issued"
+            charge_id: charge.charge_id
+          }
+        }
+      } else {
+        call fake.zendesk.comment {
+          ticket_id: "zd_dispute"
+          body: "Reviewed: not a duplicate, no refund."
+          public: false
+        }
+      }
+    }
+  }
+}"#;
+
+    fn workspace_base(src: &str) -> BTreeMap<String, String> {
+        let mut base = BTreeMap::new();
+        base.insert("goal.tach".to_string(), src.to_string());
+        base
+    }
+
+    #[test]
+    fn workspace_plan_goal_runs_resumes_and_replays_off_the_snapshot() {
+        let repo = TempRepo::new("ws_plan");
+        assert!(
+            crate::plan::builtin_plan_goal("LocalReconcile").is_none(),
+            "must be a non-catalog name so only the snapshot can resolve it"
+        );
+        let (spec, plan) = parse_plan_goal(WORKSPACE_PLAN_SRC, "LocalReconcile");
+        let r = start_plan_run(
+            repo.path(),
+            spec,
+            plan,
+            workspace_base(WORKSPACE_PLAN_SRC),
+            None,
+        )
+        .unwrap();
+        assert!(r.paused, "pauses at the first duplicate's gate");
+        let id = r.state.run_id.clone();
+        // resume_plan_run re-parses the snapshot — a catalog lookup for this name
+        // would error, so completing proves the snapshot drove it.
+        approve_pending(repo.path(), &id);
+        let mid = resume_plan_run(repo.path(), &id, None).unwrap();
+        assert!(mid.paused);
+        approve_pending(repo.path(), &id);
+        let done = resume_plan_run(repo.path(), &id, None).unwrap();
+        assert_eq!(done.state.status, "completed");
+        assert_eq!(receipts_by_tool(repo.path(), &id, "fake.stripe.refund"), 2);
+        assert!(replay_plan_run(repo.path(), &id).unwrap().identical);
+    }
+
+    #[test]
+    fn workspace_plan_run_freezes_its_source_in_the_record() {
+        // The record carries the source snapshot, which is what resume/replay read —
+        // never the live tree. (The live-edit-doesn't-matter property is proved end
+        // to end by scripts/user_plan_e2e.sh; here we lock the storage contract.)
+        let repo = TempRepo::new("ws_plan_frozen");
+        let (spec, plan) = parse_plan_goal(WORKSPACE_PLAN_SRC, "LocalReconcile");
+        let r = start_plan_run(
+            repo.path(),
+            spec,
+            plan,
+            workspace_base(WORKSPACE_PLAN_SRC),
+            None,
+        )
+        .unwrap();
+        let id = r.state.run_id.clone();
+        let rec = store::load_goal(repo.path(), &id).unwrap();
+        assert_eq!(rec.kind, "plan");
+        assert_eq!(
+            rec.base_files.get("goal.tach").map(String::as_str),
+            Some(WORKSPACE_PLAN_SRC),
+            "the goal source is frozen into the run record"
+        );
+    }
+
+    // ----- audit-grade receipts -----
+
+    #[test]
+    fn plan_receipts_carry_audit_metadata() {
+        let repo = TempRepo::new("plan_receipt_audit");
+        let (spec, plan) = reconcile();
+        let r = start_plan_run(repo.path(), spec, plan, BTreeMap::new(), None).unwrap();
+        let id = r.state.run_id.clone();
+        approve_pending(repo.path(), &id);
+        resume_plan_run(repo.path(), &id, None).unwrap();
+        approve_pending(repo.path(), &id);
+        resume_plan_run(repo.path(), &id, None).unwrap();
+
+        let receipts = store::list_receipts(repo.path(), &id);
+        let events = read_all(&store::events_path(repo.path(), &id)).unwrap();
+        for rc in &receipts {
+            assert_eq!(rc.run_id, id, "receipt names its run");
+            assert!(rc.step >= 1, "receipt records the step it committed at");
+            assert_eq!(rc.effect, rc.tool, "effect identity");
+            assert!(
+                rc.input_hash.starts_with("ih_"),
+                "receipt carries an input hash"
+            );
+            // The precomputed created_event_id must point at a real receipt.created
+            // event — this is what locks the peek_seq()+2 offset in exec_call.
+            assert!(
+                events
+                    .iter()
+                    .any(|e| e.event_id == rc.created_event_id && e.kind == kind::RECEIPT_CREATED),
+                "receipt {} references a real receipt.created event",
+                rc.receipt_id
+            );
+        }
+        // A refund runs inside an approval gate, so its receipt names that gate; the
+        // ungated list read does not.
+        let refund = receipts
+            .iter()
+            .find(|r| r.tool == "fake.stripe.refund")
+            .expect("a refund receipt");
+        assert!(
+            refund.approval_id.is_some(),
+            "a gated effect names the approval that authorized it"
+        );
+        let listed = receipts
+            .iter()
+            .find(|r| r.tool == "fake.stripe.list_disputes")
+            .expect("a list receipt");
+        assert!(
+            listed.approval_id.is_none(),
+            "an ungated effect carries no approval"
+        );
+    }
+
+    #[test]
+    fn action_receipts_carry_audit_metadata() {
+        let repo = TempRepo::new("action_receipt_audit");
+        let (spec, plan) = resolve_dup();
+        let r = start_action_run(repo.path(), spec, plan, None).unwrap();
+        let id = r.state.run_id.clone();
+        approve(repo.path(), &id, "refund");
+        resume_action_run(repo.path(), &id, None).unwrap();
+
+        let receipts = store::list_receipts(repo.path(), &id);
+        let events = read_all(&store::events_path(repo.path(), &id)).unwrap();
+        assert!(!receipts.is_empty());
+        for rc in &receipts {
+            assert_eq!(rc.run_id, id);
+            assert!(rc.input_hash.starts_with("ih_"));
+            // Locks the action-path created_event_id offset (peek_seq(), no +2).
+            assert!(
+                events
+                    .iter()
+                    .any(|e| e.event_id == rc.created_event_id && e.kind == kind::RECEIPT_CREATED),
+                "action receipt {} references a real receipt.created event",
+                rc.receipt_id
+            );
+        }
+        let refund = receipts
+            .iter()
+            .find(|r| r.tool == "fake.stripe.refund")
+            .expect("a refund receipt");
+        assert!(
+            refund.approval_id.is_some(),
+            "the gated refund names its approval"
+        );
     }
 }

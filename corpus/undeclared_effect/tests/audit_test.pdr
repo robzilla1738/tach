@@ -1,5 +1,4 @@
 import db
-
 import "../src/audit.pdr"
 
 test "count reads the seeded row" {

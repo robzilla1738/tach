@@ -7,7 +7,25 @@ use crate::token::{Tok, Token};
 /// Newlines are significant statement separators, but are suppressed while
 /// nested inside `(` or `[` so multi-line call arguments and `effects [...]`
 /// clauses read naturally. Runs of blank lines collapse to a single `Newline`.
+/// A `//` line comment, preserved for the formatter. `own_line` is true when
+/// nothing but whitespace precedes it on its line (a leading comment); false
+/// when it trails code (`let x = 1 // like this`).
+#[derive(Clone, Debug)]
+pub struct Comment {
+    /// The full text including the `//`.
+    pub text: String,
+    pub span: crate::span::Span,
+    pub own_line: bool,
+}
+
 pub fn lex(file: &str, src: &str) -> (Vec<Token>, Vec<Diagnostic>) {
+    let (toks, _, diags) = lex_collecting(file, src);
+    (toks, diags)
+}
+
+/// Like [`lex`], but also returns every comment with its placement — the
+/// formatter weaves these back into its output so reformatting never eats one.
+pub fn lex_collecting(file: &str, src: &str) -> (Vec<Token>, Vec<Comment>, Vec<Diagnostic>) {
     let chars: Vec<(usize, char)> = src.char_indices().collect();
     let n = chars.len();
     let src_len = src.len();
@@ -20,6 +38,7 @@ pub fn lex(file: &str, src: &str) -> (Vec<Token>, Vec<Diagnostic>) {
     };
 
     let mut toks: Vec<Token> = Vec::new();
+    let mut comments: Vec<Comment> = Vec::new();
     let mut diags: Vec<Diagnostic> = Vec::new();
     let mut i = 0usize;
     let mut depth: i32 = 0; // () and [] nesting
@@ -43,10 +62,22 @@ pub fn lex(file: &str, src: &str) -> (Vec<Token>, Vec<Diagnostic>) {
                 }
             }
             '/' if i + 1 < n && chars[i + 1].1 == '/' => {
-                // line comment
+                // Line comment: preserved (with placement) for the formatter.
+                let start = off;
+                let own_line = src[..start]
+                    .rsplit('\n')
+                    .next()
+                    .map(|prefix| prefix.trim().is_empty())
+                    .unwrap_or(true);
                 while i < n && chars[i].1 != '\n' {
                     i += 1;
                 }
+                let end = end_off(i);
+                comments.push(Comment {
+                    text: src[start..end].trim_end().to_string(),
+                    span: crate::span::Span::new(start, end),
+                    own_line,
+                });
             }
             '"' => {
                 let start = off;
@@ -253,7 +284,7 @@ pub fn lex(file: &str, src: &str) -> (Vec<Token>, Vec<Diagnostic>) {
         kind: Tok::Eof,
         span: Span::new(src_len, src_len),
     });
-    (toks, diags)
+    (toks, comments, diags)
 }
 
 fn is_ident_start(c: char) -> bool {

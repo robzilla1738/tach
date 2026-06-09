@@ -25,6 +25,8 @@
 
 use std::fs::{self, File};
 use std::io::{self, BufWriter, Read, Write};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -164,6 +166,14 @@ pub fn run(req: &ShellRequest) -> io::Result<ShellResult> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
+    // Put the child in its own process group (setpgid(0,0): the child becomes the
+    // group leader, so its pgid equals its pid). On a timeout we then signal the
+    // whole group, reaching descendants the child spawned — without this, a
+    // grandchild that inherited the stdout/stderr pipes would keep them open and
+    // wedge the drain threads after we kill only the direct child.
+    #[cfg(unix)]
+    cmd.process_group(0);
+
     let start = Instant::now();
     let mut child = cmd.spawn()?;
 
@@ -185,8 +195,7 @@ pub fn run(req: &ShellRequest) -> io::Result<ShellResult> {
             None => {
                 if let Some(dl) = deadline {
                     if Instant::now() >= dl {
-                        let _ = child.kill();
-                        let _ = child.wait();
+                        kill_group(&mut child);
                         timed_out = true;
                         break None;
                     }
@@ -196,7 +205,8 @@ pub fn run(req: &ShellRequest) -> io::Result<ShellResult> {
         }
     };
 
-    // Killing the child closes the pipes, so the drain threads see EOF and finish.
+    // Killing the whole group (not just the direct child) closes every inherited
+    // pipe write-end, so the drain threads see EOF and finish promptly.
     let stdout_bytes = join_drain(out_handle)?;
     let stderr_bytes = join_drain(err_handle)?;
     let duration_ms = start.elapsed().as_millis() as u64;
@@ -211,6 +221,27 @@ pub fn run(req: &ShellRequest) -> io::Result<ShellResult> {
         stderr_bytes,
         argv,
     })
+}
+
+/// Terminate a timed-out child and every descendant it spawned. On Unix the child
+/// leads its own process group (see [`run`]), so signaling the negative pgid reaches
+/// the whole tree; closing their inherited pipe write-ends is what lets the drain
+/// threads reach EOF instead of blocking on a surviving grandchild. Elsewhere we can
+/// only reach the direct child. Either way we reap it so it doesn't linger as a zombie.
+fn kill_group(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        // Group leader's pgid == its pid (process_group(0) at spawn).
+        let pgid = child.id() as libc::pid_t;
+        unsafe {
+            libc::kill(-pgid, libc::SIGKILL);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
 }
 
 type DrainHandle = thread::JoinHandle<io::Result<u64>>;

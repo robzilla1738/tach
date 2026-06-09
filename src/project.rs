@@ -206,7 +206,6 @@ pub const DEMO_AUTH: &str = r#"// auth.pdr — session loading.
 //
 // This file ships with three planted bugs. Run `perdure check` to see them, then
 // `perdure fix` to watch the compiler-as-agent-harness drive it to green.
-
 import db
 import time
 
@@ -229,7 +228,6 @@ fn session_summary(s: Session) -> String {
 "#;
 
 pub const DEMO_TEST: &str = r#"// auth_test.pdr — these pass once the code compiles cleanly.
-
 import db
 import "../src/auth.pdr"
 

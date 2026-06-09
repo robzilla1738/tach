@@ -449,9 +449,6 @@ fn cmd_fmt(rest: &[String]) -> i32 {
             Err(fmt::Skip::ParseError) => {
                 skipped.push((disp.clone(), "does not parse — run `perdure check`"))
             }
-            Err(fmt::Skip::HasComments) => {
-                skipped.push((disp.clone(), "has comments (not yet preserved)"))
-            }
             Ok(formatted) if &formatted != text => {
                 changed.push(disp.clone());
                 if !check {

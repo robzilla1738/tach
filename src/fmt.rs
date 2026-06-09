@@ -7,7 +7,10 @@
 //! removing the parens would change the parse — never gratuitously.
 
 use crate::ast::*;
+use crate::lexer::{lex_collecting, Comment};
 use crate::parser::parse;
+use crate::span::Span;
+use std::collections::VecDeque;
 
 const STEP: usize = 2;
 
@@ -16,61 +19,123 @@ const STEP: usize = 2;
 pub enum Skip {
     /// The file has syntax errors — `perdure check` will explain.
     ParseError,
-    /// The file has comments, which the AST does not yet carry. Reformatting
-    /// would delete them, so we refuse to touch it. (Comment-preserving
-    /// formatting is a planned follow-up.)
-    HasComments,
 }
 
 /// Format a source file to its canonical form, or report why it was skipped.
-/// We never reformat a file we can't render losslessly: a parse error or any
-/// comment leaves the file untouched.
+/// Comments are preserved: the lexer hands them over with their placement and
+/// the renderer weaves each one back in — leading comments above the node
+/// that follows them, trailing comments on the line they annotate. A comment
+/// is never dropped: one with no natural anchor (e.g. inside an expression)
+/// flushes as a leading comment before the next statement, and anything left
+/// at end of file is appended there.
 pub fn format_file(path: &str, src: &str) -> Result<String, Skip> {
-    if has_line_comment(src) {
-        return Err(Skip::HasComments);
-    }
+    let (_, comments, _) = lex_collecting(path, src);
     let (module, diags) = parse(path, src);
     if diags.iter().any(|d| d.is_error()) {
         return Err(Skip::ParseError);
     }
-    Ok(format_module(&module))
+    let mut w = Weaver::new(src, comments);
+    Ok(format_module_with(&module, &mut w))
 }
 
-/// Does the source contain a `//` line comment outside a string literal?
-pub fn has_line_comment(src: &str) -> bool {
-    let bytes: Vec<char> = src.chars().collect();
-    let mut i = 0;
-    let mut in_str = false;
-    while i < bytes.len() {
-        let c = bytes[i];
-        if in_str {
-            if c == '\\' {
-                i += 2;
-                continue;
-            }
-            if c == '"' {
-                in_str = false;
-            }
-        } else if c == '"' {
-            in_str = true;
-        } else if c == '/' && i + 1 < bytes.len() && bytes[i + 1] == '/' {
-            return true;
+/// The comment re-weaver: a cursor over the source's comments in offset order.
+/// Renderers call it at every line-emission point, so output order matches
+/// source order and formatting is idempotent.
+struct Weaver<'a> {
+    src: &'a str,
+    comments: VecDeque<Comment>,
+}
+
+impl<'a> Weaver<'a> {
+    fn new(src: &'a str, comments: Vec<Comment>) -> Weaver<'a> {
+        Weaver {
+            src,
+            comments: comments.into(),
         }
-        i += 1;
     }
-    false
+
+    fn empty() -> Weaver<'static> {
+        Weaver {
+            src: "",
+            comments: VecDeque::new(),
+        }
+    }
+
+    /// Emit every pending comment that starts before `pos` as its own line at
+    /// `indent`. The losslessness backstop: even a trailing-style comment that
+    /// found no line to sit on lands here rather than vanishing.
+    fn flush_before(&mut self, pos: usize, indent: usize, out: &mut String) {
+        while let Some(c) = self.comments.front() {
+            if c.span.start >= pos {
+                break;
+            }
+            let c = self.comments.pop_front().unwrap();
+            out.push_str(&pad(indent));
+            out.push_str(&c.text);
+            out.push('\n');
+        }
+    }
+
+    /// The trailing comment for a node ending at byte `end`, if the very next
+    /// pending comment sits on the same source line. Returned with a leading
+    /// space, ready to append to the rendered line.
+    fn trailing(&mut self, end: usize) -> String {
+        if let Some(c) = self.comments.front() {
+            let same_line = !c.own_line
+                && c.span.start >= end
+                && self
+                    .src
+                    .get(end..c.span.start)
+                    .is_some_and(|gap| !gap.contains('\n'));
+            if same_line {
+                let c = self.comments.pop_front().unwrap();
+                return format!(" {}", c.text);
+            }
+        }
+        String::new()
+    }
+
+    fn flush_rest(&mut self, indent: usize, out: &mut String) {
+        while let Some(c) = self.comments.pop_front() {
+            out.push_str(&pad(indent));
+            out.push_str(&c.text);
+            out.push('\n');
+        }
+    }
 }
 
-/// Render a whole module to canonical source, items separated by a blank line.
+fn item_span(item: &Item) -> Span {
+    match item {
+        Item::Import(im) => im.span,
+        Item::Type(t) => t.span,
+        Item::Fn(f) => f.span,
+        Item::Test(t) => t.span,
+        Item::Goal(g) => g.span,
+    }
+}
+
+/// Render a whole module to canonical source: items separated by a blank
+/// line, except adjacent imports, which group into one block.
 pub fn format_module(m: &Module) -> String {
+    format_module_with(m, &mut Weaver::empty())
+}
+
+fn format_module_with(m: &Module, w: &mut Weaver) -> String {
     let mut out = String::new();
     for (i, item) in m.items.iter().enumerate() {
         if i > 0 {
-            out.push('\n');
+            let both_imports =
+                matches!(item, Item::Import(_)) && matches!(m.items[i - 1], Item::Import(_));
+            if !both_imports {
+                out.push('\n');
+            }
         }
-        out.push_str(&fmt_item(item));
+        w.flush_before(item_span(item).start, 0, &mut out);
+        out.push_str(&fmt_item(item, w));
+        out.push_str(&w.trailing(item_span(item).end));
         out.push('\n');
     }
+    w.flush_rest(0, &mut out);
     out
 }
 
@@ -78,29 +143,35 @@ fn pad(n: usize) -> String {
     " ".repeat(n)
 }
 
-fn fmt_item(item: &Item) -> String {
+fn fmt_item(item: &Item, w: &mut Weaver) -> String {
     match item {
         Item::Import(im) => match &im.file {
             Some(path) => format!("import \"{}\"", path),
             None => format!("import {}", im.module),
         },
-        Item::Type(t) => fmt_type_decl(t),
-        Item::Fn(f) => fmt_fn(f),
-        Item::Test(t) => format!("test \"{}\" {}", t.name, fmt_block(&t.body, 0)),
-        Item::Goal(g) => fmt_goal(g),
+        Item::Type(t) => fmt_type_decl(t, w),
+        Item::Fn(f) => fmt_fn(f, w),
+        Item::Test(t) => format!("test \"{}\" {}", t.name, fmt_block(&t.body, 0, w)),
+        Item::Goal(g) => fmt_goal(g, w),
     }
 }
 
 /// Render a `goal` to its one canonical shape. Sections appear in a fixed order
 /// (budget, allow, require) and empty sections are omitted, so the same goal
 /// always formats the same way regardless of how it was authored.
-fn fmt_goal(g: &GoalDecl) -> String {
+fn fmt_goal(g: &GoalDecl, w: &mut Weaver) -> String {
     let head = match &g.success {
         Some(s) => format!("goal {} -> {} {{", g.name, s),
         None => format!("goal {} {{", g.name),
     };
     let mut s = head;
     s.push('\n');
+
+    // Comments inside the budget/allow/require sections have no per-line AST
+    // anchors; they gather at the top of the goal body (and keep gathering
+    // there on re-format, so this stays idempotent).
+    let sections_end = g.plan.as_ref().map(|p| p.span.start).unwrap_or(g.span.end);
+    w.flush_before(sections_end, STEP, &mut s);
 
     let b = &g.budget;
     if b.steps.is_some() || b.retries.is_some() || b.time.is_some() || b.cost.is_some() {
@@ -185,9 +256,11 @@ fn fmt_goal(g: &GoalDecl) -> String {
 
     if let Some(plan) = &g.plan {
         s.push_str(&format!("{}plan {{\n", pad(STEP)));
-        s.push_str(&fmt_plan_stmts(&plan.stmts, STEP * 2));
+        s.push_str(&fmt_plan_stmts(&plan.stmts, STEP * 2, w));
+        w.flush_before(plan.span.end, STEP * 2, &mut s);
         s.push_str(&format!("{}}}\n", pad(STEP)));
     }
+    w.flush_before(g.span.end, STEP, &mut s);
 
     s.push('}');
     s
@@ -196,66 +269,78 @@ fn fmt_goal(g: &GoalDecl) -> String {
 /// Render a plan body. Tool calls always lay their inputs out one field per line
 /// (a `call` is the unit of work in a workflow — keeping each argument on its own
 /// line keeps diffs and reviews legible); control flow nests by one step.
-fn fmt_plan_stmts(stmts: &[PlanStmt], indent: usize) -> String {
+fn plan_stmt_span(st: &PlanStmt) -> Span {
+    match st {
+        PlanStmt::Let { span, .. }
+        | PlanStmt::Call { span, .. }
+        | PlanStmt::Approve { span, .. }
+        | PlanStmt::If { span, .. }
+        | PlanStmt::For { span, .. }
+        | PlanStmt::While { span, .. } => *span,
+    }
+}
+
+fn fmt_plan_stmts(stmts: &[PlanStmt], indent: usize, w: &mut Weaver) -> String {
     let mut s = String::new();
     for st in stmts {
-        match st {
+        let sp = plan_stmt_span(st);
+        w.flush_before(sp.start, indent, &mut s);
+        let rendered = match st {
             PlanStmt::Let { name, value, .. } => {
                 let rhs = match value {
                     PlanValue::Call(c) => fmt_plan_call(c, indent),
                     PlanValue::Expr(e) => fmt_expr(e, indent),
                 };
-                s.push_str(&format!("{}let {} = {}\n", pad(indent), name, rhs));
+                format!("{}let {} = {}", pad(indent), name, rhs)
             }
             PlanStmt::Call { call, .. } => {
-                s.push_str(&format!("{}{}\n", pad(indent), fmt_plan_call(call, indent)));
+                format!("{}{}", pad(indent), fmt_plan_call(call, indent))
             }
             PlanStmt::Approve { summary, body, .. } => {
-                s.push_str(&format!(
-                    "{}approve \"{}\" {{\n",
-                    pad(indent),
-                    escape(summary)
-                ));
-                s.push_str(&fmt_plan_stmts(body, indent + STEP));
-                s.push_str(&format!("{}}}\n", pad(indent)));
+                let mut r = format!("{}approve \"{}\" {{\n", pad(indent), escape(summary));
+                r.push_str(&fmt_plan_stmts(body, indent + STEP, w));
+                w.flush_before(sp.end, indent + STEP, &mut r);
+                r.push_str(&format!("{}}}", pad(indent)));
+                r
             }
             PlanStmt::If {
                 cond, then, els, ..
             } => {
-                s.push_str(&format!(
-                    "{}if {} {{\n",
-                    pad(indent),
-                    fmt_expr(cond, indent)
-                ));
-                s.push_str(&fmt_plan_stmts(then, indent + STEP));
+                let mut r = format!("{}if {} {{\n", pad(indent), fmt_expr(cond, indent));
+                r.push_str(&fmt_plan_stmts(then, indent + STEP, w));
                 if let Some(els) = els {
-                    s.push_str(&format!("{}}} else {{\n", pad(indent)));
-                    s.push_str(&fmt_plan_stmts(els, indent + STEP));
+                    r.push_str(&format!("{}}} else {{\n", pad(indent)));
+                    r.push_str(&fmt_plan_stmts(els, indent + STEP, w));
                 }
-                s.push_str(&format!("{}}}\n", pad(indent)));
+                w.flush_before(sp.end, indent + STEP, &mut r);
+                r.push_str(&format!("{}}}", pad(indent)));
+                r
             }
             PlanStmt::For {
                 var, iter, body, ..
             } => {
-                s.push_str(&format!(
+                let mut r = format!(
                     "{}for {} in {} {{\n",
                     pad(indent),
                     var,
                     fmt_expr(iter, indent)
-                ));
-                s.push_str(&fmt_plan_stmts(body, indent + STEP));
-                s.push_str(&format!("{}}}\n", pad(indent)));
+                );
+                r.push_str(&fmt_plan_stmts(body, indent + STEP, w));
+                w.flush_before(sp.end, indent + STEP, &mut r);
+                r.push_str(&format!("{}}}", pad(indent)));
+                r
             }
             PlanStmt::While { cond, body, .. } => {
-                s.push_str(&format!(
-                    "{}while {} {{\n",
-                    pad(indent),
-                    fmt_expr(cond, indent)
-                ));
-                s.push_str(&fmt_plan_stmts(body, indent + STEP));
-                s.push_str(&format!("{}}}\n", pad(indent)));
+                let mut r = format!("{}while {} {{\n", pad(indent), fmt_expr(cond, indent));
+                r.push_str(&fmt_plan_stmts(body, indent + STEP, w));
+                w.flush_before(sp.end, indent + STEP, &mut r);
+                r.push_str(&format!("{}}}", pad(indent)));
+                r
             }
-        }
+        };
+        s.push_str(&rendered);
+        s.push_str(&w.trailing(sp.end));
+        s.push('\n');
     }
     s
 }
@@ -293,13 +378,21 @@ fn fmt_glob_list(globs: &[String]) -> String {
     }
 }
 
-fn fmt_type_decl(d: &TypeDecl) -> String {
+fn fmt_type_decl(d: &TypeDecl, w: &mut Weaver) -> String {
     match &d.ty {
         TypeExpr::Record { fields, .. } => {
             let mut s = format!("type {} = {{\n", d.name);
             for (n, ft) in fields {
-                s.push_str(&format!("{}{}: {}\n", pad(STEP), n, fmt_type(ft)));
+                w.flush_before(ft.span().start, STEP, &mut s);
+                s.push_str(&format!(
+                    "{}{}: {}{}\n",
+                    pad(STEP),
+                    n,
+                    fmt_type(ft),
+                    w.trailing(ft.span().end)
+                ));
             }
+            w.flush_before(d.span.end, STEP, &mut s);
             s.push('}');
             s
         }
@@ -338,7 +431,7 @@ fn fmt_type(t: &TypeExpr) -> String {
     }
 }
 
-fn fmt_fn(f: &FnDecl) -> String {
+fn fmt_fn(f: &FnDecl, w: &mut Weaver) -> String {
     let params: Vec<String> = f
         .params
         .iter()
@@ -352,24 +445,38 @@ fn fmt_fn(f: &FnDecl) -> String {
         let names: Vec<&str> = eff.effects.iter().map(|e| e.name.as_str()).collect();
         sig.push_str(&format!(" effects [{}]", names.join(", ")));
     }
-    format!("{} {}", sig, fmt_block(&f.body, 0))
+    format!("{} {}", sig, fmt_block(&f.body, 0, w))
 }
 
 /// Render a `{ ... }` block whose opening brace sits at column `indent`.
-fn fmt_block(b: &Block, indent: usize) -> String {
+fn fmt_block(b: &Block, indent: usize, w: &mut Weaver) -> String {
     let inner = indent + STEP;
     let mut s = String::from("{\n");
     for stmt in &b.stmts {
+        let sp = stmt_span(stmt);
+        w.flush_before(sp.start, inner, &mut s);
         s.push_str(&pad(inner));
-        s.push_str(&fmt_stmt(stmt, inner));
+        s.push_str(&fmt_stmt(stmt, inner, w));
+        s.push_str(&w.trailing(sp.end));
         s.push('\n');
     }
+    w.flush_before(b.span.end, inner, &mut s);
     s.push_str(&pad(indent));
     s.push('}');
     s
 }
 
-fn fmt_stmt(s: &Stmt, indent: usize) -> String {
+fn stmt_span(s: &Stmt) -> Span {
+    match s {
+        Stmt::Let { span, .. }
+        | Stmt::Return { span, .. }
+        | Stmt::Ensure { span, .. }
+        | Stmt::If { span, .. } => *span,
+        Stmt::Expr(e) => e.span(),
+    }
+}
+
+fn fmt_stmt(s: &Stmt, indent: usize, w: &mut Weaver) -> String {
     match s {
         Stmt::Let {
             name, ty, value, ..
@@ -392,9 +499,13 @@ fn fmt_stmt(s: &Stmt, indent: usize) -> String {
         Stmt::If {
             cond, then, els, ..
         } => {
-            let mut out = format!("if {} {}", fmt_expr(cond, indent), fmt_block(then, indent));
+            let mut out = format!(
+                "if {} {}",
+                fmt_expr(cond, indent),
+                fmt_block(then, indent, w)
+            );
             if let Some(eb) = els {
-                out.push_str(&format!(" else {}", fmt_block(eb, indent)));
+                out.push_str(&format!(" else {}", fmt_block(eb, indent, w)));
             }
             out
         }
@@ -648,6 +759,13 @@ mod tests {
             ("main.pdr", crate::project::CLEAN_MAIN),
             ("main_test.pdr", crate::project::CLEAN_TEST),
             ("goal.pdr", crate::project::DEMO_GOAL),
+            // The comment-bearing templates are fixed points now that the
+            // formatter preserves comments.
+            ("auth.pdr", crate::project::DEMO_AUTH),
+            ("auth_test.pdr", crate::project::DEMO_TEST),
+            ("main.pdr", crate::project::CLEAN_MAIN),
+            ("main_test.pdr", crate::project::CLEAN_TEST),
+            ("shell_demo.pdr", crate::project::PLAN_DEMO_SHELL),
             // Plan goals must round-trip too — the formatter renders the whole
             // `plan { … }` block and never drops it.
             ("plan_demo.pdr", crate::project::PLAN_DEMO_CHARGEBACKS),
@@ -668,21 +786,82 @@ mod tests {
                 match format_file(&path, &text) {
                     Ok(f) => assert_eq!(f, text, "corpus/{}/{} is not formatted", name, path),
                     Err(Skip::ParseError) => panic!("corpus/{}/{} does not parse", name, path),
-                    Err(Skip::HasComments) => {}
                 }
             }
         }
     }
 
+    /// Every comment in the input must appear in the output (the formatter
+    /// may move one, but never eats one), and formatting must be idempotent.
+    fn preserves_and_settles(src: &str) -> String {
+        let once = format_file("c.pdr", src).expect("formats");
+        let twice = format_file("c.pdr", &once).expect("reformats");
+        assert_eq!(once, twice, "formatting must be idempotent:\n{once}");
+        let count = |s: &str| s.matches("//").count();
+        assert_eq!(
+            count(src),
+            count(&once),
+            "no comment may be lost:\nin:\n{src}\nout:\n{once}"
+        );
+        once
+    }
+
     #[test]
-    fn refuses_to_eat_comments() {
-        // A file with comments is skipped, never reformatted — no data loss.
-        let src = "// a note\nfn f() -> Int {\n  return 1\n}\n";
-        assert_eq!(format_file("c.pdr", src), Err(Skip::HasComments));
-        // but `//` inside a string is not a comment.
-        assert!(!has_line_comment(
-            "fn f() -> String { return \"http://x\" }"
-        ));
-        assert!(has_line_comment("fn f() -> Int { return 1 } // tail"));
+    fn leading_and_trailing_comments_survive() {
+        let src = "// a note about f\nfn f() -> Int {\n  return 1 // the answer-ish\n}\n";
+        let out = preserves_and_settles(src);
+        assert!(out.contains("// a note about f\nfn f()"), "{out}");
+        assert!(out.contains("return 1 // the answer-ish"), "{out}");
+    }
+
+    #[test]
+    fn comments_inside_blocks_and_records_survive() {
+        let src = "type Session = {\n  // the bearer token\n  token: String // opaque\n  user_id: Int\n}\n\nfn f(s: Session) -> Int {\n  // before the return\n  return s.user_id\n  // after everything\n}\n";
+        let out = preserves_and_settles(src);
+        assert!(
+            out.contains("  // the bearer token\n  token: String // opaque"),
+            "{out}"
+        );
+        assert!(
+            out.contains("  // before the return\n  return s.user_id"),
+            "{out}"
+        );
+        assert!(out.contains("  // after everything\n}"), "{out}");
+    }
+
+    #[test]
+    fn comments_in_plans_and_goal_sections_survive() {
+        let src = "goal G -> Success {\n  // why this budget\n  budget { steps: 5 }\n  allow { fake.email.send }\n  plan {\n    // the only step\n    call fake.email.send { to: \"x\" } // fires once\n  }\n}\n";
+        let out = preserves_and_settles(src);
+        assert!(out.contains("// why this budget"), "{out}");
+        assert!(out.contains("    // the only step"), "{out}");
+        assert!(out.contains("// fires once"), "{out}");
+    }
+
+    #[test]
+    fn comment_only_and_eof_comments_survive() {
+        let out = preserves_and_settles("// just a note\n");
+        assert_eq!(out, "// just a note\n");
+        let out2 = preserves_and_settles("fn f() -> Int {\n  return 1\n}\n// trailing file note\n");
+        assert!(out2.ends_with("// trailing file note\n"), "{out2}");
+    }
+
+    #[test]
+    fn a_comment_inside_an_expression_is_moved_not_eaten() {
+        // No anchor inside expressions: it surfaces on a nearby line instead.
+        // (Newlines are suppressed inside parens, so this parses.)
+        let src = "fn g(a: Int, b: Int) -> Int {\n  return a\n}\n\nfn f() -> Int {\n  return g(1, // why one\n    2)\n}\n";
+        let once = format_file("c.pdr", src).expect("formats");
+        assert!(once.contains("// why one"), "preserved somewhere: {once}");
+    }
+
+    #[test]
+    fn adjacent_imports_group_without_blank_lines() {
+        let src = "import db\n\nimport time\n\nfn f() -> Int {\n  return 1\n}\n";
+        let out = preserves_and_settles(src);
+        assert!(
+            out.starts_with("import db\nimport time\n\nfn f()"),
+            "imports form one block: {out}"
+        );
     }
 }

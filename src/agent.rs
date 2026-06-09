@@ -604,6 +604,7 @@ fn session_summary(s: Session) -> String {
 
     const TESTS: &str = r#"
 import db
+import "../src/auth.pdr"
 
 test "valid session loads" {
   db.seed("abc", { token: "abc", user_id: 7, expires_at: 9999 })
@@ -631,6 +632,26 @@ test "expired session rejected" {
         assert!(out.final_tests_passed >= 2);
         assert_eq!(out.metrics.patches_applied, 3, "expected 3 fixes");
         assert_eq!(out.metrics.regressions, 0);
+    }
+
+    #[test]
+    fn fix_inserts_a_missing_file_import() {
+        let mut w = Workspace::new();
+        w.insert(
+            "src/lib.pdr",
+            "fn double(x: Int) -> Int {\n  return x * 2\n}\n",
+        );
+        w.insert(
+            "src/main.pdr",
+            "fn run() -> Int {\n  return double(21)\n}\n",
+        );
+        let out = fix(w, Strategy::Minimal, 4);
+        assert_eq!(out.status, "green", "laps: {:#?}", out.laps);
+        assert!(
+            out.final_files["src/main.pdr"].contains("import \"./lib.pdr\""),
+            "fix applied the E0473 add_import patch: {}",
+            out.final_files["src/main.pdr"]
+        );
     }
 
     #[test]

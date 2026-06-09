@@ -34,6 +34,11 @@ pub fn check_program(program: &Program) -> Vec<Diagnostic> {
     let sigs = build_sigs(program);
     let mut diags = Vec::new();
 
+    // --- file imports: resolve `import "./x.pdr"` edges (E0470/E0471/E0472)
+    // and compute each unit's transitive reach for the visibility check below.
+    let reach = check_file_imports(program, &mut diags);
+    check_symbol_visibility(program, &reach, &mut diags);
+
     for unit in &program.units {
         // --- import check: every builtin module used anywhere in the file must
         // be imported. Gathered once per file and deduped to the first use site.
@@ -61,7 +66,7 @@ pub fn check_program(program: &Program) -> Vec<Diagnostic> {
         // in this file. A lint, not an error.
         for item in &unit.module.items {
             if let Item::Import(im) = item {
-                if !file_modules.contains_key(&im.module) {
+                if im.file.is_none() && !file_modules.contains_key(&im.module) {
                     diags.push(unused_import_diag(unit, im));
                 }
             }
@@ -607,6 +612,343 @@ fn check_fn_effects(
             });
             diags.push(diag);
         }
+    }
+}
+
+/// Resolve every `import "./x.pdr"` edge: refuse escapes (E0471), missing
+/// targets (E0470), and cycles (E0472). Returns each unit's transitive reach —
+/// itself plus everything its file imports (recursively) make visible.
+fn check_file_imports(
+    program: &Program,
+    diags: &mut Vec<Diagnostic>,
+) -> HashMap<String, BTreeSet<String>> {
+    let paths: BTreeSet<String> = program
+        .units
+        .iter()
+        .map(|u| u.source.path.clone())
+        .collect();
+    // path -> [(target, import span)]
+    let mut edges: HashMap<String, Vec<(String, Span)>> = HashMap::new();
+    for unit in &program.units {
+        let from = unit.source.path.clone();
+        for item in &unit.module.items {
+            if let Item::Import(im) = item {
+                let raw = match &im.file {
+                    Some(r) => r,
+                    None => continue,
+                };
+                match crate::program::normalize_import(&from, raw) {
+                    Err(reason) => diags.push(
+                        Diagnostic::error(
+                            "E0471",
+                            "import_outside_workspace",
+                            format!("`import \"{raw}\"` {reason}"),
+                            &from,
+                            im.span,
+                        )
+                        .with_note(
+                            "a file import can only name a file inside this workspace",
+                        ),
+                    ),
+                    Ok(norm) if !paths.contains(&norm) => diags.push(
+                        Diagnostic::error(
+                            "E0470",
+                            "import_not_found",
+                            format!(
+                                "`import \"{raw}\"` resolves to `{norm}`, which is not a file in this workspace"
+                            ),
+                            &from,
+                            im.span,
+                        )
+                        .with_note(format!(
+                            "workspace files: {}",
+                            paths
+                                .iter()
+                                .map(|p| format!("`{p}`"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )),
+                    ),
+                    Ok(norm) => edges.entry(from.clone()).or_default().push((norm, im.span)),
+                }
+            }
+        }
+    }
+
+    // Cycle detection: iterative DFS, three colors. A back edge (target is on
+    // the current stack) is a cycle; report it at that import's span.
+    let mut color: HashMap<&str, u8> = HashMap::new(); // 0 white, 1 gray, 2 black
+    for start in &paths {
+        if color.get(start.as_str()).copied().unwrap_or(0) != 0 {
+            continue;
+        }
+        // (node, next edge index); explicit stack so the gray set is exact.
+        let mut stack: Vec<(&str, usize)> = vec![(start.as_str(), 0)];
+        color.insert(start.as_str(), 1);
+        while let Some((node, idx)) = stack.pop() {
+            let outs = edges.get(node).map(|v| v.as_slice()).unwrap_or(&[]);
+            if idx < outs.len() {
+                stack.push((node, idx + 1));
+                let (target, span) = &outs[idx];
+                match color.get(target.as_str()).copied().unwrap_or(0) {
+                    0 => {
+                        color.insert(
+                            // Borrow from `paths` so the lifetime outlives the map.
+                            paths.get(target.as_str()).unwrap().as_str(),
+                            1,
+                        );
+                        stack.push((paths.get(target.as_str()).unwrap().as_str(), 0));
+                    }
+                    1 => {
+                        // node -> target closes a loop through the gray stack.
+                        let mut cycle: Vec<&str> = stack.iter().map(|(n, _)| *n).collect();
+                        if let Some(pos) = cycle.iter().position(|n| *n == target.as_str()) {
+                            cycle = cycle[pos..].to_vec();
+                        }
+                        cycle.dedup();
+                        cycle.push(target.as_str());
+                        diags.push(
+                            Diagnostic::error(
+                                "E0472",
+                                "import_cycle",
+                                format!("file imports form a cycle: {}", cycle.join(" -> ")),
+                                node,
+                                *span,
+                            )
+                            .with_note("break the cycle by moving the shared definitions into a file both can import"),
+                        );
+                    }
+                    _ => {}
+                }
+            } else {
+                color.insert(node, 2);
+            }
+        }
+    }
+
+    // Transitive closure per unit (BFS over edges). Visibility, not loading —
+    // the workspace is still one merged compilation unit at runtime.
+    let mut reach: HashMap<String, BTreeSet<String>> = HashMap::new();
+    for path in &paths {
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut queue = vec![path.clone()];
+        while let Some(p) = queue.pop() {
+            if !seen.insert(p.clone()) {
+                continue;
+            }
+            for (t, _) in edges.get(&p).map(|v| v.as_slice()).unwrap_or(&[]) {
+                queue.push(t.clone());
+            }
+        }
+        reach.insert(path.clone(), seen);
+    }
+    reach
+}
+
+/// E0473: using another file's function or type without importing that file.
+/// One diagnostic per (unit, target file) at the first use site, carrying a
+/// patch that inserts the canonical relative import — `fix` applies it.
+fn check_symbol_visibility(
+    program: &Program,
+    reach: &HashMap<String, BTreeSet<String>>,
+    diags: &mut Vec<Diagnostic>,
+) {
+    // Symbol -> defining unit path. Last definition wins, matching
+    // `Program::functions()` / the type registry.
+    let mut fn_defs: HashMap<&str, &str> = HashMap::new();
+    let mut type_defs: HashMap<&str, &str> = HashMap::new();
+    for u in &program.units {
+        for it in &u.module.items {
+            match it {
+                Item::Fn(f) => {
+                    fn_defs.insert(&f.name, &u.source.path);
+                }
+                Item::Type(t) => {
+                    type_defs.insert(&t.name, &u.source.path);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    for unit in &program.units {
+        let here = unit.source.path.as_str();
+        let visible = reach.get(here).cloned().unwrap_or_default();
+        // target file -> (symbol, first use span)
+        let mut missing: BTreeMap<String, (String, Span)> = BTreeMap::new();
+        let mut calls: Vec<(String, Span)> = Vec::new();
+        let mut types: Vec<(String, Span)> = Vec::new();
+        {
+            let mut on_call = |n: &str, s: Span| calls.push((n.to_string(), s));
+            let mut on_type = |n: &str, s: Span| types.push((n.to_string(), s));
+            for item in &unit.module.items {
+                match item {
+                    Item::Fn(f) => {
+                        for p in &f.params {
+                            collect_type_names(&p.ty, &mut on_type);
+                        }
+                        if let Some(r) = &f.ret {
+                            collect_type_names(r, &mut on_type);
+                        }
+                        collect_symbol_uses(&f.body, &mut on_call, &mut on_type);
+                    }
+                    Item::Test(t) => collect_symbol_uses(&t.body, &mut on_call, &mut on_type),
+                    Item::Type(t) => collect_type_names(&t.ty, &mut on_type),
+                    _ => {}
+                }
+            }
+        }
+        let mut note = |name: &str, span: Span, def: Option<&str>| {
+            if let Some(def) = def {
+                if def != here && !visible.contains(def) {
+                    missing
+                        .entry(def.to_string())
+                        .or_insert((name.to_string(), span));
+                }
+            }
+        };
+        for (name, span) in &calls {
+            note(name, *span, fn_defs.get(name.as_str()).copied());
+        }
+        for (name, span) in &types {
+            note(name, *span, type_defs.get(name.as_str()).copied());
+        }
+
+        for (target, (symbol, span)) in missing {
+            let rel = crate::program::relative_import_path(here, &target);
+            let (patch_span, replacement) = if unit.module.last_import_end > 0 {
+                (
+                    Span::at(unit.module.last_import_end),
+                    format!("\nimport \"{rel}\""),
+                )
+            } else {
+                (Span::at(0), format!("import \"{rel}\"\n"))
+            };
+            diags.push(
+                Diagnostic::error(
+                    "E0473",
+                    "symbol_not_imported",
+                    format!("`{symbol}` is defined in `{target}`, which this file does not import"),
+                    here,
+                    span,
+                )
+                .with_strategies(&["add_import"])
+                .with_patch(PreferredPatch {
+                    file: here.to_string(),
+                    span: patch_span,
+                    replacement,
+                    rationale: format!("import `{rel}` to bring `{symbol}` into scope"),
+                })
+                .with_note(format!("add `import \"{rel}\"` at the top of the file")),
+            );
+        }
+    }
+}
+
+/// Walk a block for function-call names and record-literal type names.
+fn collect_symbol_uses(
+    block: &Block,
+    on_call: &mut dyn FnMut(&str, Span),
+    on_type: &mut dyn FnMut(&str, Span),
+) {
+    for s in &block.stmts {
+        match s {
+            Stmt::Let { ty, value, .. } => {
+                if let Some(t) = ty {
+                    collect_type_names(t, on_type);
+                }
+                collect_expr_uses(value, on_call, on_type);
+            }
+            Stmt::Return { value, .. } => {
+                if let Some(v) = value {
+                    collect_expr_uses(v, on_call, on_type);
+                }
+            }
+            Stmt::Ensure { cond, els, .. } => {
+                collect_expr_uses(cond, on_call, on_type);
+                if let Some(e) = els {
+                    collect_expr_uses(e, on_call, on_type);
+                }
+            }
+            Stmt::If {
+                cond, then, els, ..
+            } => {
+                collect_expr_uses(cond, on_call, on_type);
+                collect_symbol_uses(then, on_call, on_type);
+                if let Some(e) = els {
+                    collect_symbol_uses(e, on_call, on_type);
+                }
+            }
+            Stmt::Expr(e) => collect_expr_uses(e, on_call, on_type),
+        }
+    }
+}
+
+fn collect_expr_uses(
+    e: &Expr,
+    on_call: &mut dyn FnMut(&str, Span),
+    on_type: &mut dyn FnMut(&str, Span),
+) {
+    match e {
+        Expr::Call { callee, args, .. } => {
+            if let Expr::Ident(name, span) = callee.as_ref() {
+                on_call(name, *span);
+            } else {
+                collect_expr_uses(callee, on_call, on_type);
+            }
+            for a in args {
+                collect_expr_uses(a, on_call, on_type);
+            }
+        }
+        Expr::Record { name, fields, .. } => {
+            if let Some(n) = name {
+                on_type(n, e.span());
+            }
+            for (_, fe) in fields {
+                collect_expr_uses(fe, on_call, on_type);
+            }
+        }
+        Expr::Method { recv, args, .. } => {
+            collect_expr_uses(recv, on_call, on_type);
+            for a in args {
+                collect_expr_uses(a, on_call, on_type);
+            }
+        }
+        Expr::Field { recv, .. } => collect_expr_uses(recv, on_call, on_type),
+        Expr::Unary { expr, .. } | Expr::Try { expr, .. } => {
+            collect_expr_uses(expr, on_call, on_type)
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            collect_expr_uses(lhs, on_call, on_type);
+            collect_expr_uses(rhs, on_call, on_type);
+        }
+        Expr::Ok(inner, _) | Expr::Err(inner, _) => collect_expr_uses(inner, on_call, on_type),
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            collect_expr_uses(scrutinee, on_call, on_type);
+            for arm in arms {
+                collect_expr_uses(&arm.body, on_call, on_type);
+            }
+        }
+        Expr::Int(..) | Expr::Float(..) | Expr::Str(..) | Expr::Bool(..) | Expr::Ident(..) => {}
+    }
+}
+
+fn collect_type_names(t: &TypeExpr, on_type: &mut dyn FnMut(&str, Span)) {
+    match t {
+        TypeExpr::Name { name, args, span } => {
+            on_type(name, *span);
+            for a in args {
+                collect_type_names(a, on_type);
+            }
+        }
+        TypeExpr::Record { fields, .. } => {
+            for (_, ft) in fields {
+                collect_type_names(ft, on_type);
+            }
+        }
+        TypeExpr::Sum { .. } => {}
     }
 }
 
@@ -1967,6 +2309,88 @@ fn compute(x: Int) -> Int {
   }
 }"#;
         assert!(plan_diag_kinds(ungranted).contains(&"tool_ungranted".to_string()));
+    }
+
+    #[test]
+    fn cross_file_symbol_without_import_is_e0473_with_a_patch() {
+        let lib = "fn double(x: Int) -> Int {\n  return x * 2\n}\n";
+        let main = "fn run() -> Int {\n  return double(21)\n}\n";
+        let (prog, _) = Program::parse_sources(vec![
+            SourceFile::new("src/lib.pdr", lib),
+            SourceFile::new("src/main.pdr", main),
+        ]);
+        let diags = check_program(&prog);
+        let d = diags
+            .iter()
+            .find(|d| d.kind == "symbol_not_imported")
+            .expect("an E0473 error");
+        assert_eq!(d.code, "E0473");
+        assert_eq!(d.file, "src/main.pdr");
+        let p = d.preferred_patch.as_ref().expect("an add_import patch");
+        assert!(
+            p.replacement.contains("import \"./lib.pdr\""),
+            "canonical relative spelling: {:?}",
+            p.replacement
+        );
+
+        // With the import present, the same program is clean.
+        let fixed = format!("import \"./lib.pdr\"\n\n{main}");
+        let (prog2, _) = Program::parse_sources(vec![
+            SourceFile::new("src/lib.pdr", lib),
+            SourceFile::new("src/main.pdr", &fixed),
+        ]);
+        assert!(
+            !check_program(&prog2)
+                .iter()
+                .any(|d| d.kind == "symbol_not_imported"),
+            "the patch's import satisfies visibility"
+        );
+    }
+
+    #[test]
+    fn file_imports_are_transitively_visible() {
+        // a imports b, b imports c: a may use c's symbols. Visibility follows
+        // the import graph, not single hops — a file vouches for what it
+        // imports.
+        let a = "import \"./b.pdr\"\n\nfn top() -> Int {\n  return base(1)\n}\n";
+        let b = "import \"./c.pdr\"\n\nfn mid() -> Int {\n  return base(2)\n}\n";
+        let c = "fn base(x: Int) -> Int {\n  return x\n}\n";
+        let (prog, _) = Program::parse_sources(vec![
+            SourceFile::new("a.pdr", a),
+            SourceFile::new("b.pdr", b),
+            SourceFile::new("c.pdr", c),
+        ]);
+        assert!(
+            !check_program(&prog)
+                .iter()
+                .any(|d| d.kind == "symbol_not_imported"),
+            "transitive imports are visible"
+        );
+    }
+
+    #[test]
+    fn missing_and_escaping_file_imports_are_errors() {
+        let src = "import \"./nope.pdr\"\nimport \"../outside.pdr\"\n";
+        let (prog, _) = Program::parse_sources(vec![SourceFile::new("main.pdr", src)]);
+        let diags = check_program(&prog);
+        assert!(diags.iter().any(|d| d.code == "E0470"), "{diags:?}");
+        assert!(diags.iter().any(|d| d.code == "E0471"), "{diags:?}");
+    }
+
+    #[test]
+    fn an_import_cycle_is_e0472() {
+        let a = "import \"./b.pdr\"\n";
+        let b = "import \"./a.pdr\"\n";
+        let (prog, _) = Program::parse_sources(vec![
+            SourceFile::new("a.pdr", a),
+            SourceFile::new("b.pdr", b),
+        ]);
+        let diags = check_program(&prog);
+        let d = diags
+            .iter()
+            .find(|d| d.kind == "import_cycle")
+            .expect("an E0472 error");
+        assert!(d.message.contains("->"), "names the cycle: {}", d.message);
     }
 
     #[test]

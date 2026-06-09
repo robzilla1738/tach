@@ -1,3 +1,5 @@
+import "../src/calc.pdr"
+
 test "answer is forty-two" {
   ensure answer() == 42
 }

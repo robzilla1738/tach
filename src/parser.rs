@@ -153,9 +153,20 @@ impl Parser {
 
     fn parse_import(&mut self) -> Import {
         let kw = self.expect(Tok::Import);
+        // `import "./billing.pdr"` is a file import; `import db` a builtin one.
+        if let Tok::Str(path) = self.peek().clone() {
+            let sp = self.peek_span();
+            self.bump();
+            return Import {
+                module: path.clone(),
+                file: Some(path),
+                span: kw.to(sp),
+            };
+        }
         let (module, sp) = self.expect_ident();
         Import {
             module,
+            file: None,
             span: kw.to(sp),
         }
     }
@@ -1458,6 +1469,24 @@ fn describe(p: Parity) -> String {
         assert_eq!(g.require.conditions.len(), 2);
         assert_eq!(g.require.conditions[0].name, "tests.pass");
         assert!(g.plan.is_none(), "a repair goal has no plan block");
+    }
+
+    #[test]
+    fn parses_a_file_import() {
+        let (module, diags) = parse("t.pdr", "import db\nimport \"./billing.pdr\"\n");
+        assert!(diags.iter().all(|d| !d.is_error()), "{diags:?}");
+        let imports: Vec<_> = module
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                Item::Import(im) => Some(im),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(imports.len(), 2);
+        assert_eq!(imports[0].module, "db");
+        assert!(imports[0].file.is_none());
+        assert_eq!(imports[1].file.as_deref(), Some("./billing.pdr"));
     }
 
     #[test]

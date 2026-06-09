@@ -1,5 +1,7 @@
 import db
 
+import "../src/audit.pdr"
+
 test "count reads the seeded row" {
   db.seed("k", { id: 1 })
   ensure count() == 1

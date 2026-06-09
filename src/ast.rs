@@ -171,7 +171,13 @@ pub struct RequireCond {
 
 #[derive(Clone, Debug)]
 pub struct Import {
+    /// For a builtin import (`import db`) the module name. For a file import
+    /// (`import "./billing.pdr"`) the raw quoted path as written.
     pub module: String,
+    /// `Some(raw path)` when this is a file import. Resolution (normalizing
+    /// against the importing file's directory, cycle/escape checks) is the
+    /// checker's job — the AST records what was written.
+    pub file: Option<String>,
     pub span: Span,
 }
 

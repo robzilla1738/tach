@@ -1,3 +1,5 @@
+import "../src/light.pdr"
+
 test "stop is blocked" {
   ensure allow(Stop) == false
 }

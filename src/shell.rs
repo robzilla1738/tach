@@ -505,6 +505,9 @@ mod tests {
         assert_eq!(r.stdout_bytes, 2_000_000);
     }
 
+    // Unix-gated: the prompt-kill guarantee rides on process groups, which the
+    // non-unix path explicitly documents as best-effort (direct child only).
+    #[cfg(unix)]
     #[test]
     fn timeout_kills_a_runaway() {
         let dir = TempDir::new("slow");
@@ -576,8 +579,11 @@ mod tests {
         assert_eq!(out, "CLEAN", "secret leaked into child env");
     }
 
+    #[cfg(unix)]
     #[test]
     fn home_is_sandboxed_and_program_resolved() {
+        // (unix-gated below: under Git Bash on Windows, $HOME is POSIX-translated
+        // and the comparison is about the path STRING, not the guarantee.)
         // The child's HOME is the sandbox dir we pass, never the real user home —
         // so it cannot read credentials out of `~`. And the resolved program path
         // is recorded for audit.

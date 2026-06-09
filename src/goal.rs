@@ -51,6 +51,12 @@ pub struct AllowSpec {
     pub fs_write: Vec<String>,
     #[serde(default)]
     pub shell: Vec<String>,
+    /// URL globs granted to `http.get` / `http.post` plan calls. Serde-defaulted
+    /// so goal.json written before these existed still loads (as deny-all).
+    #[serde(default)]
+    pub http_get: Vec<String>,
+    #[serde(default)]
+    pub http_post: Vec<String>,
     #[serde(default)]
     pub tools: Vec<String>,
 }
@@ -71,6 +77,8 @@ impl GoalSpec {
                 fs_read: g.allow.fs_read.clone(),
                 fs_write: g.allow.fs_write.clone(),
                 shell: g.allow.shell.clone(),
+                http_get: g.allow.http_get.clone(),
+                http_post: g.allow.http_post.clone(),
                 tools: g.allow.tools.clone(),
             },
             require: g

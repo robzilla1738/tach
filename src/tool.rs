@@ -31,7 +31,7 @@ pub const STDOUT_INLINE_CAP: u64 = 16 * 1024;
 /// Every tool a plan may name: the deterministic fakes plus the real ones.
 pub fn known_tools() -> Vec<&'static str> {
     let mut v: Vec<&'static str> = action::known_tools().to_vec();
-    v.push("shell.run");
+    v.extend(["shell.run", "http.get", "http.post"]);
     v
 }
 
@@ -47,14 +47,15 @@ pub fn is_real(tool: &str) -> bool {
 }
 
 /// Is this tool granted *at all* by the goal? Fake tools are granted by name
-/// in `allow { <tool> }`; `shell.run` is granted by a non-empty
-/// `allow { shell.run [...] }` command list (the per-command check is
-/// [`authorize`]'s job). Default-deny: an empty grant list grants nothing.
+/// in `allow { <tool> }`; the real tools by their non-empty grant lists
+/// (`shell.run [...]`, `http.get [...]`, `http.post [...]`) — the per-item
+/// check is [`authorize`]'s job. Default-deny: an empty list grants nothing.
 pub fn tool_granted(spec: &GoalSpec, tool: &str) -> bool {
-    if tool == "shell.run" {
-        !spec.allowed_commands().is_empty()
-    } else {
-        spec.allowed_tools().contains(tool)
+    match tool {
+        "shell.run" => !spec.allowed_commands().is_empty(),
+        "http.get" => !spec.allow.http_get.is_empty(),
+        "http.post" => !spec.allow.http_post.is_empty(),
+        _ => spec.allowed_tools().contains(tool),
     }
 }
 
@@ -80,6 +81,25 @@ pub fn authorize(spec: &GoalSpec, tool: &str, input: &Value) -> Result<(), Strin
             parse_timeout(input)?;
             Ok(())
         }
+        "http.get" | "http.post" => {
+            let url = input
+                .get("url")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "`url` is required and must be a string".to_string())?;
+            crate::http::url_allowed(spec, tool, url)?;
+            crate::http::check_headers(input)?;
+            if let Some(v) = input.get("timeout_ms") {
+                let t = v
+                    .as_u64()
+                    .ok_or_else(|| "`timeout_ms` must be a non-negative integer".to_string())?;
+                if t == 0 || t > MAX_TIMEOUT_MS {
+                    return Err(format!(
+                        "`timeout_ms` must be between 1 and {MAX_TIMEOUT_MS}"
+                    ));
+                }
+            }
+            Ok(())
+        }
         other => Err(format!("`{other}` is not a real tool")),
     }
 }
@@ -101,6 +121,7 @@ pub fn invoke_real(
 ) -> io::Result<Result<Value, String>> {
     match tool {
         "shell.run" => invoke_shell(repo, run_id, key, input),
+        "http.get" | "http.post" => crate::http::invoke_http(repo, run_id, key, tool, input),
         other => Ok(Err(format!("`{other}` is not a real tool"))),
     }
 }

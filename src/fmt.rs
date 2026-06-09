@@ -122,6 +122,8 @@ fn fmt_goal(g: &GoalDecl) -> String {
         || !a.fs_read.is_empty()
         || !a.fs_write.is_empty()
         || !a.shell.is_empty()
+        || !a.http_get.is_empty()
+        || !a.http_post.is_empty()
         || !a.tools.is_empty()
     {
         s.push_str(&format!("{}allow {{\n", pad(STEP)));
@@ -147,6 +149,20 @@ fn fmt_goal(g: &GoalDecl) -> String {
                 "{}shell.run {}\n",
                 pad(STEP * 2),
                 fmt_glob_list(&a.shell)
+            ));
+        }
+        if !a.http_get.is_empty() {
+            s.push_str(&format!(
+                "{}http.get {}\n",
+                pad(STEP * 2),
+                fmt_glob_list(&a.http_get)
+            ));
+        }
+        if !a.http_post.is_empty() {
+            s.push_str(&format!(
+                "{}http.post {}\n",
+                pad(STEP * 2),
+                fmt_glob_list(&a.http_post)
             ));
         }
         for t in &a.tools {
@@ -576,6 +592,22 @@ mod tests {
             "call dropped: {out}"
         );
         assert!(out.contains("        to: x.addr"), "input dropped: {out}");
+    }
+
+    #[test]
+    fn formats_http_allow_lines_in_canonical_order() {
+        // The allow section's canonical order is: effects, fs.read, fs.write,
+        // shell.run, http.get, http.post, tools. A goal written out of order
+        // round-trips into it.
+        let src = "goal G -> Success {\n  budget { steps: 5 }\n  allow {\n    http.post [\"https://api.stripe.com/v1/refunds\"]\n    shell.run [\"cargo test\"]\n    http.get \"https://api.example.com/**\"\n  }\n  plan {\n    call http.get { url: \"https://api.example.com/x\" }\n  }\n}\n";
+        let out = roundtrips(src);
+        let shell_at = out.find("shell.run").unwrap();
+        let get_at = out.find("http.get \"https://api.example.com/**\"").unwrap();
+        let post_at = out.find("http.post").unwrap();
+        assert!(
+            shell_at < get_at && get_at < post_at,
+            "canonical order: {out}"
+        );
     }
 
     #[test]

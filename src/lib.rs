@@ -23,6 +23,7 @@ pub mod fmt;
 pub mod goal;
 pub mod guard;
 pub mod hash;
+pub mod http;
 pub mod interp;
 pub mod lexer;
 pub mod mcp;

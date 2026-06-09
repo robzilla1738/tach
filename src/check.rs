@@ -213,10 +213,16 @@ pub fn check_plan_goal(g: &GoalDecl, unit: &Unit, diags: &mut Vec<Diagnostic>) {
         None => return,
     };
     let mut granted: BTreeSet<String> = g.allow.tools.iter().cloned().collect();
-    // `shell.run` is granted by a non-empty `allow { shell.run [...] }` command
-    // list, not by name in `tools` — mirror `tool::tool_granted`.
+    // The real tools are granted by their non-empty grant lists, not by name
+    // in `tools` — mirror `tool::tool_granted`.
     if !g.allow.shell.is_empty() {
         granted.insert("shell.run".into());
+    }
+    if !g.allow.http_get.is_empty() {
+        granted.insert("http.get".into());
+    }
+    if !g.allow.http_post.is_empty() {
+        granted.insert("http.post".into());
     }
     let known: Vec<String> = crate::tool::known_tools()
         .iter()
@@ -340,6 +346,31 @@ fn check_plan_call(
             )
             .with_note(note),
         );
+    } else if c.tool.starts_with("http.") {
+        // A literal credential header would be frozen into the goal source,
+        // the receipt input, and the event log. The runtime refuses it too
+        // (defense in depth); this diagnostic teaches the fix.
+        if let Some((_, Expr::Record { fields, .. })) = c.input.iter().find(|(k, _)| k == "headers")
+        {
+            for (name, fe) in fields {
+                let norm = name.to_ascii_lowercase();
+                if crate::http::SENSITIVE_HEADERS.contains(&norm.as_str()) {
+                    diags.push(
+                        Diagnostic::error(
+                            "E0439",
+                            "secret_in_source",
+                            format!("header `{name}` is a credential and must not be a literal"),
+                            &unit.source.path,
+                            fe.span(),
+                        )
+                        .with_note(format!(
+                            "use `headers_env {{ {name}: \"ENV_VAR_NAME\" }}` — the value is \
+                             read from the environment at call time and never recorded"
+                        )),
+                    );
+                }
+            }
+        }
     } else if c.tool == "shell.run" {
         // The command allowlist is exact-match; a literal `cmd` not on it will
         // be refused at runtime (authority.denied), so say it at check time.
@@ -1885,6 +1916,57 @@ fn compute(x: Int) -> Int {
         // must not fire for a goal that carries a plan block.
         assert!(!plan_diag_kinds(crate::project::PLAN_DEMO_CHARGEBACKS)
             .contains(&"unknown_require_condition".to_string()));
+    }
+
+    #[test]
+    fn literal_credential_header_is_flagged_as_secret_in_source() {
+        let src = r#"goal G -> Success {
+  budget { steps: 5 }
+  allow { http.post "https://api.stripe.com/**" }
+  plan {
+    call http.post {
+      url: "https://api.stripe.com/v1/refunds"
+      headers: { authorization: "Bearer sk_live_oops" }
+    }
+  }
+}"#;
+        let (prog, _) = Program::parse_sources(vec![SourceFile::new("m.pdr", src)]);
+        let diags = check_program(&prog);
+        let d = diags
+            .iter()
+            .find(|d| d.kind == "secret_in_source")
+            .expect("an E0439 secret_in_source error");
+        assert_eq!(d.code, "E0439");
+        assert!(
+            d.notes.iter().any(|n| n.contains("headers_env")),
+            "the note teaches the env indirection: {:?}",
+            d.notes
+        );
+    }
+
+    #[test]
+    fn http_tools_are_granted_by_their_url_globs() {
+        let src = r#"goal G -> Success {
+  budget { steps: 5 }
+  allow { http.get "https://api.example.com/**" }
+  plan {
+    call http.get { url: "https://api.example.com/x" }
+  }
+}"#;
+        let kinds = plan_diag_kinds(src);
+        assert!(
+            !kinds.contains(&"tool_ungranted".to_string())
+                && !kinds.contains(&"unknown_tool".to_string()),
+            "granted by the glob list: {kinds:?}"
+        );
+        let ungranted = r#"goal G -> Success {
+  budget { steps: 5 }
+  allow { fake.email.send }
+  plan {
+    call http.post { url: "https://api.example.com/x" }
+  }
+}"#;
+        assert!(plan_diag_kinds(ungranted).contains(&"tool_ungranted".to_string()));
     }
 
     #[test]

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tach.dev/schemas/guard-verify.schema.json",
+  "title": "Tach Guard Verify Result",
+  "description": "The result of `tach guard verify [--rerun]` — the same status packet as `tach guard status`, emitted after the scope gate runs and each required command executes (or its receipt is reused). Read `verified`: it is true only when every required command exited 0 AND no out-of-scope file changed. The full command evidence (exit codes, stdout/stderr artifacts) lives in the receipts, not here.",
+  "type": "object",
+  "required": ["run_id", "goal", "phase", "verified", "commands_required", "commands_passed", "out_of_scope", "receipts", "step"],
+  "additionalProperties": false,
+  "properties": {
+    "run_id": { "type": "string", "description": "The guard session id." },
+    "goal": { "type": "string", "description": "The goal name." },
+    "phase": { "type": "string", "description": "Session phase after verify: verified on success, otherwise open." },
+    "verified": { "type": "boolean", "description": "True only when every required command passed AND no out-of-scope file changed." },
+    "commands_required": { "type": "integer", "minimum": 0, "description": "How many commands the goal requires to pass." },
+    "commands_passed": { "type": "integer", "minimum": 0, "description": "How many required commands passed on this verify." },
+    "out_of_scope": { "type": "integer", "minimum": 0, "description": "How many changed files fell outside the goal's fs.write scope (a non-zero count fails verify before any command runs)." },
+    "receipts": { "type": "integer", "minimum": 0, "description": "How many command receipts this session has minted." },
+    "step": { "type": "integer", "minimum": 0, "description": "The session's cumulative durable-effect step counter." }
+  }
+}

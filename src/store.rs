@@ -16,6 +16,7 @@
 //! durable state, and the working tree is never left half-edited.
 
 use crate::goal::GoalSpec;
+use crate::snapshot::Manifest;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -278,15 +279,11 @@ pub fn load_state(repo: &Path, run_id: &str) -> io::Result<RunState> {
 /// repo-relative path -> content-hash map the scope/diff gate compares against.
 /// Kept separate from `goal.json` so a real repo's baseline (hashes only) never
 /// bloats the goal record the way `base_files` (full source) would.
-pub fn save_baseline(
-    repo: &Path,
-    run_id: &str,
-    manifest: &BTreeMap<String, String>,
-) -> io::Result<()> {
+pub fn save_baseline(repo: &Path, run_id: &str, manifest: &Manifest) -> io::Result<()> {
     write_json(&baseline_path(repo, run_id), manifest)
 }
 
-pub fn load_baseline(repo: &Path, run_id: &str) -> io::Result<BTreeMap<String, String>> {
+pub fn load_baseline(repo: &Path, run_id: &str) -> io::Result<Manifest> {
     read_json(&baseline_path(repo, run_id))
 }
 

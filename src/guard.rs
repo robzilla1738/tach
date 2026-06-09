@@ -60,6 +60,9 @@ pub struct GuardContext {
     pub forbidden: Value,
     pub current_failure: Option<String>,
     pub next_required_action: String,
+    /// The single check an agent must use to decide it is finished, stated so the
+    /// packet is self-describing: do not claim done until this holds.
+    pub done_condition: String,
     pub verified: bool,
 }
 
@@ -238,13 +241,15 @@ fn scope_diff(
 }
 
 /// A stable digest of a tree manifest — folded into the verify idempotency key so
-/// reuse is sound only when the tree the command ran against is unchanged.
+/// reuse is sound only when the tree the command ran against is unchanged. Folds
+/// each entry's full signature (content, kind, exec bit, symlink target), so a
+/// metadata-only change still mints a fresh run rather than reusing a stale proof.
 fn manifest_digest(m: &Manifest) -> String {
     let mut s = String::new();
-    for (p, h) in m {
+    for (p, entry) in m {
         s.push_str(p);
         s.push('\0');
-        s.push_str(h);
+        s.push_str(&entry.signature());
         s.push('\n');
     }
     snapshot::content_hash(s.as_bytes())
@@ -302,6 +307,7 @@ pub fn context(repo: &Path, run_id: &str) -> io::Result<GuardContext> {
         }),
         current_failure: last_failure(repo, run_id),
         next_required_action: next.to_string(),
+        done_condition: "`tach guard status --json` reports verified=true".to_string(),
         verified: state.verified,
     })
 }
@@ -771,6 +777,25 @@ mod tests {
         assert!(!s.verified);
         let out = commit(r.path(), &id).unwrap();
         assert!(!out.ok);
+        let events = read_all(&store::events_path(r.path(), &id)).unwrap();
+        assert!(events.iter().any(|e| e.kind == kind::SCOPE_VIOLATION));
+    }
+
+    #[test]
+    fn github_workflow_edit_is_out_of_scope_and_blocks_commit() {
+        // The dot-directory blind spot, end to end: an agent that edits CI config
+        // under a `src/**, tests/**` goal must be caught by the gate.
+        let r = TempRepo::new("ghscope");
+        scaffold(&r, true);
+        let id = begin(r.path(), None).unwrap().run_id;
+        r.write(".github/workflows/ci.yml", "on: push\njobs: {}\n");
+        let d = diff(r.path(), &id).unwrap();
+        assert_eq!(d.out_of_scope, vec![".github/workflows/ci.yml"]);
+        assert!(d.rejected, "CI-config edit must be rejected at the gate");
+        let s = verify(r.path(), &id, false).unwrap();
+        assert!(!s.verified);
+        let out = commit(r.path(), &id).unwrap();
+        assert!(!out.ok, "out-of-scope CI edit must block commit");
         let events = read_all(&store::events_path(r.path(), &id)).unwrap();
         assert!(events.iter().any(|e| e.kind == kind::SCOPE_VIOLATION));
     }

@@ -171,9 +171,12 @@ the durable ledger. Follow this contract.
   - Run `tach guard verify` and read the JSON.
   - **Do not tell the user the task is done unless Tach reports `verified: true`.**
     `verified` is true only when every required command passed AND no out-of-scope
-    file changed.
-  - Finish with `tach guard commit`. If it refuses, run `tach guard diff --json`,
-    fix the violations, and verify again.
+    file changed. The `done_condition` field of `context --json` states this check.
+  - Finish with `tach guard finalize` (alias: `tach guard commit`). This finalizes the
+    run into **Tach's own ledger only — it does not create a git commit or touch git in
+    any way.** Staging, committing, or pushing to git is yours to do (or not), separately.
+  - If `finalize` refuses, run `tach guard diff --json`, fix the violations, and verify
+    again.
 
 Goal: {goal_name}
 Verified by: `{command}`

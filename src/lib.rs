@@ -25,6 +25,7 @@ pub mod guard;
 pub mod hash;
 pub mod interp;
 pub mod lexer;
+pub mod mcp;
 pub mod parser;
 pub mod patch;
 pub mod plan;

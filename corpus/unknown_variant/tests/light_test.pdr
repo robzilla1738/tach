@@ -1,3 +1,5 @@
+import "../src/light.pdr"
+
 test "go is allowed" {
   ensure allow(Go) == true
 }

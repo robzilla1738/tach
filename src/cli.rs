@@ -109,7 +109,7 @@ fn is_file_arg(s: &str) -> bool {
 /// Load a single `.pdr` file if one was named, otherwise the whole project.
 fn load_target(p: &Parsed) -> Result<Workspace, String> {
     if let Some(first) = p.pos.iter().find(|s| is_file_arg(s)) {
-        return project::load_single(Path::new(first)).map_err(|e| e.to_string());
+        return project::load_with_imports(Path::new(first)).map_err(|e| e.to_string());
     }
     project::load_workspace(&cwd()).map_err(|e| e.to_string())
 }

@@ -91,6 +91,46 @@ pub fn load_single(path: &Path) -> io::Result<Workspace> {
     Ok(ws)
 }
 
+/// Load a single named file PLUS its transitive file imports, rooting the
+/// workspace at the named file's directory. `perdure check src/main.pdr` then
+/// sees everything `main.pdr` imports, so cross-file references resolve the
+/// same as a whole-workspace load. An unreadable import target is skipped
+/// here — the checker reports it as E0470 against the file that names it.
+pub fn load_with_imports(path: &Path) -> io::Result<Workspace> {
+    let root = path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let first = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string_lossy().to_string());
+    let mut ws = Workspace::new();
+    let mut queue = vec![first];
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    while let Some(rel) = queue.pop() {
+        if !seen.insert(rel.clone()) {
+            continue;
+        }
+        let text = match fs::read_to_string(root.join(&rel)) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let (module, _) = crate::parser::parse(&rel, &text);
+        for item in &module.items {
+            if let crate::ast::Item::Import(im) = item {
+                if let Some(raw) = &im.file {
+                    if let Ok(norm) = crate::program::normalize_import(&rel, raw) {
+                        queue.push(norm);
+                    }
+                }
+            }
+        }
+        ws.insert(rel, text);
+    }
+    Ok(ws)
+}
+
 /// Write back every file whose contents changed. Returns the list of changed
 /// relative paths.
 pub fn write_back(
@@ -191,6 +231,7 @@ fn session_summary(s: Session) -> String {
 pub const DEMO_TEST: &str = r#"// auth_test.pdr — these pass once the code compiles cleanly.
 
 import db
+import "../src/auth.pdr"
 
 test "valid session loads" {
   db.seed("abc", { token: "abc", user_id: 7, expires_at: 9999 })
@@ -328,7 +369,9 @@ fn main() -> String effects [log.write] {
 }
 "#;
 
-pub const CLEAN_TEST: &str = r#"test "greet echoes its argument" {
+pub const CLEAN_TEST: &str = r#"import "../src/main.pdr"
+
+test "greet echoes its argument" {
   ensure greet("perdure") == "perdure"
 }
 "#;

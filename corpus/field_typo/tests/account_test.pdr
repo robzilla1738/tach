@@ -1,3 +1,5 @@
+import "../src/account.pdr"
+
 test "balance is read" {
   ensure current_balance(Account { id: 1, balance: 42 }) == 42
 }

@@ -80,7 +80,10 @@ fn pad(n: usize) -> String {
 
 fn fmt_item(item: &Item) -> String {
     match item {
-        Item::Import(im) => format!("import {}", im.module),
+        Item::Import(im) => match &im.file {
+            Some(path) => format!("import \"{}\"", path),
+            None => format!("import {}", im.module),
+        },
         Item::Type(t) => fmt_type_decl(t),
         Item::Fn(f) => fmt_fn(f),
         Item::Test(t) => format!("test \"{}\" {}", t.name, fmt_block(&t.body, 0)),
@@ -608,6 +611,14 @@ mod tests {
             shell_at < get_at && get_at < post_at,
             "canonical order: {out}"
         );
+    }
+
+    #[test]
+    fn formats_file_imports() {
+        let src = "import db\nimport \"../src/auth.pdr\"\n\ntest \"x\" {\n  ensure load_session(\"a\").is_ok()\n}\n";
+        let out = roundtrips(src);
+        assert!(out.contains("import db\n"), "{out}");
+        assert!(out.contains("import \"../src/auth.pdr\"\n"), "{out}");
     }
 
     #[test]

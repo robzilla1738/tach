@@ -1075,7 +1075,16 @@ pub fn verify_inner(
             state.receipts_created += 1;
             log.append(
                 kind::RECEIPT_CREATED,
-                json!({ "receipt_id": receipt.receipt_id, "command": cmd, "idempotency_key": key }),
+                json!({
+                    "receipt_id": receipt.receipt_id,
+                    "command": cmd,
+                    "idempotency_key": key,
+                    // Anchor a hash of the receipt's evidence (input + output) into the
+                    // chain, so a later edit to a recorded exit code can't pass `audit`:
+                    // the recompute won't match, and the anchor can't be fixed without
+                    // breaking the event's own chain hash.
+                    "receipt_hash": store::receipt_content_hash(&receipt.input, &receipt.output),
+                }),
             )?;
             // Intra-verify danger window (test-only): the receipt is durable but the
             // verified bit is not yet saved. Resume must reuse this receipt.
@@ -1353,12 +1362,18 @@ pub fn replay(repo: &Path, run_id: &str, rerun: bool) -> io::Result<crate::runti
 ///
 ///   1. **Chain** — every event self-authenticates (its `entry_hash` recomputes) and
 ///      links to its predecessor; any edit, insertion, removal, or reorder shows.
-///   2. **Receipts** — each receipt's `input_hash` recomputes (untampered) and is
-///      anchored to a `receipt.created` event *in the verified chain* (so a forged
-///      receipt file with no matching chain event is caught, and a chain event whose
-///      receipt file was deleted is caught too).
+///   2. **Receipts** — each receipt is anchored to a `receipt.created` event *in the
+///      verified chain* (a forged receipt file with no matching chain event is caught,
+///      and a chain event whose receipt file was deleted is caught too), and its
+///      *body* recomputes against the content hash that event anchored — so editing a
+///      recorded exit code (or any input/output byte) is exposed, and the anchor can't
+///      be fixed without breaking the chain that commits to it. (Receipts from before
+///      the anchor shipped carry no hash; their existence is still checked, their body
+///      is treated as unverifiable rather than flagged — graceful v1→v2 degradation.)
 ///   3. **State** — the recorded `verified` bit matches the verdict the receipts
 ///      actually support, so a hand-edited `state.json: verified=true` is exposed.
+///      Because (2) anchors each exit code, this can't be defeated by *also* forging a
+///      failed receipt into a pass: that edit no longer matches the chain.
 ///
 /// This is detection, not prevention: with no sandbox an agent *can* rewrite files in
 /// `.perdure/`, but it cannot produce a self-consistent forgery. The trust boundary is an
@@ -1414,15 +1429,21 @@ pub fn audit(repo: &Path, run_id: &str) -> io::Result<AuditReport> {
                 "cannot derive a verdict from unreadable receipts".to_string(),
             ),
             Ok(rs) => {
-                // Receipt ids the chain says were legitimately created.
-                let created: BTreeMap<String, ()> = events
+                // Receipt ids the chain says were legitimately created, each mapped to
+                // the content hash that creation event anchored (`None` for a pre-anchor
+                // legacy event, whose body is unverifiable but whose existence still
+                // counts — the same graceful degradation as a v1 chain link).
+                let created: BTreeMap<String, Option<String>> = events
                     .iter()
                     .filter(|e| e.kind == kind::RECEIPT_CREATED)
                     .filter_map(|e| {
-                        e.payload
-                            .get("receipt_id")
+                        let rid = e.payload.get("receipt_id").and_then(|v| v.as_str())?;
+                        let anchored = e
+                            .payload
+                            .get("receipt_hash")
                             .and_then(|v| v.as_str())
-                            .map(|rid| (rid.to_string(), ()))
+                            .map(|s| s.to_string());
+                        Some((rid.to_string(), anchored))
                     })
                     .collect();
                 let mut faults = Vec::new();
@@ -1434,11 +1455,30 @@ pub fn audit(repo: &Path, run_id: &str) -> io::Result<AuditReport> {
                             r.receipt_id
                         ));
                     }
-                    if chain_ok && !created.contains_key(&r.receipt_id) {
-                        faults.push(format!(
-                            "{}: not anchored to any receipt.created event — forged receipt",
-                            r.receipt_id
-                        ));
+                    if chain_ok {
+                        match created.get(&r.receipt_id) {
+                            None => faults.push(format!(
+                                "{}: not anchored to any receipt.created event — forged receipt",
+                                r.receipt_id
+                            )),
+                            // The chain commits to a hash of this receipt's evidence;
+                            // recompute it and a forged exit code (or any input/output
+                            // edit) no longer matches — and the anchor itself can't be
+                            // fixed without breaking the chain link that carries it.
+                            Some(Some(anchored)) => {
+                                let recomputed = store::receipt_content_hash(&r.input, &r.output);
+                                if &recomputed != anchored {
+                                    faults.push(format!(
+                                        "{}: receipt body altered — its input/output no \
+                                         longer matches the hash anchored in the chain",
+                                        r.receipt_id
+                                    ));
+                                }
+                            }
+                            // Legacy receipt.created with no anchored hash: existence is
+                            // verified above; the body is unverifiable, not flagged.
+                            Some(None) => {}
+                        }
                     }
                 }
                 if chain_ok {
@@ -1681,6 +1721,59 @@ mod tests {
         // The chain itself was untouched, so that check still passes — the forgery is
         // localized to state.json, exactly where audit points.
         assert!(rep.chain_ok, "the event chain was not touched");
+    }
+
+    #[test]
+    fn audit_detects_a_forged_receipt_exit_code() {
+        // The subtler forgery that defeats the `verified`-bit check alone: a genuinely
+        // FAILED run whose receipt `output.exit_code` is hand-edited to 0 *and* whose
+        // `state.json` is flipped to match. The derived verdict reads the forged exit
+        // code, so it agrees with the forged bit and check (3) is satisfied — only the
+        // chain-anchored content hash exposes it.
+        let r = TempRepo::new("forge_receipt");
+        scaffold(&r, false); // broken → verify fails, the command receipt records a nonzero exit
+        let id = begin(r.path(), Some("FixFailingTests")).unwrap().run_id;
+        assert!(!verify(r.path(), &id, false).unwrap().verified);
+
+        // An untouched failed run audits clean (it is honestly recorded as a failure).
+        assert!(
+            audit(r.path(), &id).unwrap().ok,
+            "an honest failed run is itself untampered"
+        );
+
+        // Forge the receipt body: rewrite its recorded exit code to a pass.
+        let rid = store::list_receipts(r.path(), &id)[0].receipt_id.clone();
+        let mut rcpt = store::load_receipt(r.path(), &id, &rid).unwrap();
+        assert_ne!(
+            rcpt.output.get("exit_code").and_then(|v| v.as_i64()),
+            Some(0),
+            "the failed run's receipt should record a nonzero exit before forgery"
+        );
+        rcpt.output["exit_code"] = serde_json::json!(0);
+        store::save_receipt(r.path(), &id, &rcpt).unwrap();
+
+        // Flip state.json to present a clean, verified, in-scope pass — making the
+        // forgery internally self-consistent for the chain and state checks.
+        let mut st = store::load_state(r.path(), &id).unwrap();
+        st.verified = true;
+        st.out_of_scope = 0;
+        st.guard_phase = "verified".into();
+        store::save_state(r.path(), &st).unwrap();
+
+        let rep = audit(r.path(), &id).unwrap();
+        assert!(!rep.ok, "a forged-pass receipt must not audit clean");
+        assert!(
+            !rep.receipts_ok,
+            "the receipt content hash must catch the edited exit code: {}",
+            rep.receipts_detail
+        );
+        // The chain was not touched and the state now matches the (forged) receipt, so
+        // those two checks pass — proving the receipt body anchor is what exposes it.
+        assert!(rep.chain_ok, "the event chain itself was not altered");
+        assert!(
+            rep.state_consistent,
+            "the forged state agrees with the forged receipt — only the body hash dissents"
+        );
     }
 
     #[test]

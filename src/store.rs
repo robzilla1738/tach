@@ -868,6 +868,23 @@ pub fn input_hash(v: &Value) -> String {
     format!("ih_{}", crate::hash::sha256_hex(&[&canonical_bytes(v)]))
 }
 
+/// A content hash over the *evidence* a receipt carries — its `input` (the command
+/// and the tree it ran against) and its `output` (exit code, timing, the artifacts it
+/// points at). Unlike [`input_hash`], which a tamperer can simply recompute after
+/// editing the receipt, this digest is written into the receipt's `receipt.created`
+/// **event**, whose own `entry_hash` is a link in the tamper-evident chain. So editing
+/// a recorded exit code — or any other input/output byte — no longer matches the
+/// anchor, and an attacker cannot quietly fix the anchor without breaking the chain
+/// that commits to it. SHA-256 for the same reason `input_hash` is: this is
+/// integrity metadata that must resist a crafted collision, not mere addressing.
+pub fn receipt_content_hash(input: &Value, output: &Value) -> String {
+    let evidence = serde_json::json!({ "input": input, "output": output });
+    format!(
+        "rh_{}",
+        crate::hash::sha256_hex(&[&canonical_bytes(&evidence)])
+    )
+}
+
 /// A short stable hex digest of a JSON value, used by fake tools to mint
 /// deterministic result ids (e.g. `re_<digest>`) with no clock or randomness.
 pub fn short_digest(v: &Value) -> String {

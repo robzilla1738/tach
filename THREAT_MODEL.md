@@ -78,10 +78,13 @@ statement of trust — grant narrowly.
 
 ## Detected, not prevented (the ledger is evidence, not a wall)
 
-The event log is an append-only SHA-256 hash chain (`perdure.event.v1`); receipts are
-anchored to chain events and carry input hashes; `perdure guard audit` re-derives the
-chain, the receipt anchoring, and the verified-bit consistency, and exits nonzero on any
-inconsistency. **This is tamper-evidence, not tamper-prevention**: the ledger lives in
+The event log is an append-only SHA-256 hash chain (`perdure.event.v1`); each receipt's
+`receipt.created` event anchors a content hash of the receipt's evidence — both its input
+*and* its output, so a recorded exit code cannot be edited after the fact — and that
+anchor is itself a link in the chain, so it cannot be quietly fixed to match a forgery.
+`perdure guard audit` re-derives the chain, the receipt anchoring and body integrity, and
+the verified-bit consistency, and exits nonzero on any inconsistency. **This is
+tamper-evidence, not tamper-prevention**: the ledger lives in
 `.perdure/`, which an agent with filesystem access can write. It cannot forge a
 *self-consistent* history without inverting SHA-256, so an audit catches it — but only
 an out-of-process authority can prevent it. That is what `perdure serve-mcp` is for: run

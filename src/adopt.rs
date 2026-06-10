@@ -39,7 +39,12 @@ pub fn detect(repo: &Path) -> Option<Detected> {
             command: "cargo test".into(),
             typecheck: Some("cargo check".into()),
             ecosystem: "rust",
-            write_globs: vec!["src/**".into(), "tests/**".into()],
+            // `Cargo.lock` is in scope because `cargo test` regenerates it: on a fresh
+            // checkout that hasn't committed one, the first `verify` would otherwise see
+            // the command's own lockfile as an out-of-scope write and refuse — a dead-on-
+            // arrival adoption for any such repo. Including it keeps lockfile churn
+            // visible to the gate (tracked, not hidden) rather than ignored.
+            write_globs: vec!["src/**".into(), "tests/**".into(), "Cargo.lock".into()],
         });
     }
     if has("package.json") {
@@ -400,7 +405,15 @@ mod tests {
     fn detects_rust_and_js_and_go() {
         let r = TempRepo::new("rust");
         r.touch("Cargo.toml", "[package]\nname=\"x\"\n");
-        assert_eq!(detect(r.path()).unwrap().command, "cargo test");
+        let rust = detect(r.path()).unwrap();
+        assert_eq!(rust.command, "cargo test");
+        // `Cargo.lock` must be in the default write scope, or the lockfile `cargo test`
+        // regenerates would trip the out-of-scope gate on a fresh repo's first verify.
+        assert!(
+            rust.write_globs.iter().any(|g| g == "Cargo.lock"),
+            "Rust scope must include Cargo.lock: {:?}",
+            rust.write_globs
+        );
 
         let j = TempRepo::new("js");
         j.touch("package.json", "{}");

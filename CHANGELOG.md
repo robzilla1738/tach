@@ -4,6 +4,30 @@ All notable changes to perdure are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [SemVer](https://semver.org/) with pre-release tags during the alpha.
 
+## [Unreleased]
+
+### Security
+
+- **`perdure guard audit` could be fooled into certifying a failed run as a verified
+  pass.** The hash chain anchored a receipt's existence and input, but its output block —
+  including `exit_code` — was bound to nothing. Since `audit` derives the verified verdict
+  by reading `exit_code` back out of the receipt, an agent with write access to `.perdure/`
+  could rewrite a real failure (`exit 101 → 0`) and match `state.json` to it, and the audit
+  reported "ledger intact". Each receipt's `receipt.created` event now anchors a SHA-256
+  content hash of the receipt's *body* (input **and** output); `audit` recomputes it and the
+  anchor is itself a chain link, so an edited exit code can no longer masquerade as a pass.
+  Receipts written before the anchor degrade gracefully (existence checked, body treated as
+  unverifiable rather than flagged). Regression-tested.
+- **The installer now verifies the downloaded artifact against the release's
+  `SHA256SUMS`** before unpacking, and aborts on a checksum mismatch.
+
+### Fixed
+
+- The first `perdure guard verify` on a fresh Rust checkout with no committed `Cargo.lock`
+  was refused: `cargo test` regenerates the lockfile, which the pre-command scope gate saw
+  as an out-of-scope write. `Cargo.lock` is now part of the Rust default `fs.write` scope, so
+  lockfile churn is tracked by the gate rather than blocking adoption.
+
 ## [0.2.0-alpha.1] — 2026-06-09
 
 The first public alpha, and the release that renames the project: **tach is

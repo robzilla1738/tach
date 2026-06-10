@@ -402,10 +402,11 @@ What Perdure guarantees across a session:
   re-executing; `--rerun` actually re-runs and compares.
 - **Tamper-evident and auditable.** The event log is a SHA-256 hash chain, so editing, inserting,
   removing, or reordering any event breaks every link after it. `perdure guard audit` re-derives a
-  run's integrity from outside the agent — the chain, each receipt's anchoring and untampered
-  input hash, and whether the recorded `verified` bit is actually supported by the receipts — and
-  exits non-zero if anything was forged. With no sandbox an agent with `.perdure/` write access can
-  still *corrupt* its own ledger; what it can't do is forge a self-consistent one. Detection, not
+  run's integrity from outside the agent — the chain, each receipt's anchoring and a content hash of
+  its body (input *and* output) committed into the chain, so an edited exit code can't masquerade as
+  a pass, and whether the recorded `verified` bit is actually supported by the receipts — and exits
+  non-zero if anything was forged. With no sandbox an agent with `.perdure/` write access can still
+  *corrupt* its own ledger; what it can't do is forge a self-consistent one. Detection, not
   prevention, is the guarantee here.
 
 Nondeterministic evidence (stdout bytes, durations, exit timing) lives in receipts and
